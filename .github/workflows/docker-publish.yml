@@ -6,6 +6,7 @@ name: Docker
 # documentation.
 
 on:
+  pull_request:
   push:
     # Publish semver tags as releases.
     tags: [ 'v*.*.*' ]
@@ -18,7 +19,28 @@ env:
 
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run unit tests with coverage
+        run: |
+          go test ./... -v -coverprofile=coverage.out
+          go tool cover -func=coverage.out
+
   build:
+    if: github.event_name == 'push'
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
