@@ -1,0 +1,59 @@
+--boundary123
+Content-Disposition: form-data; name="email"
+
+Received: by mx0032p1mdw1.sendgrid.net with SMTP id rOkt2xLLKV Tue, 19 Jul 2016 15:06:29 +0000 (UTC)
+Received: from mail-it0-f45.google.com (mail-it0-f45.google.com [209.85.214.45]) by mx0032p1mdw1.sendgrid.net (Postfix) with ESMTPS id 26D6080397 for <parse@parse.yourdomain>; Tue, 19 Jul 2016 15:06:22 +0000 (UTC)
+Received: by mail-it0-f45.google.com with SMTP id f6so93587860ith.1 for <example@example.com>; Tue, 19 Jul 2016 08:06:22 -0700 (PDT)
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=sendgrid.com; s=ga1; h=mime-version:from:date:message-id:subject:to; bh=UYWCIUKTVXyV9U41l+c9+qOlpoeQGcJkKpyOAatNr3Y=; b=c1I/LcqHEJklmAThWr9Z8NKlTPHUlE/8sDSpK382fJtIQcGdUtczG0pijnUHegrFVt FDr4NehtJDD9KFvXLXboLCtObsu5HTN99ckUCCZTibZseA+J8U3jjCqTdj1fmUage5C7 //Iwi0Ndioonzhm18J7KStap66yZ69ED7UxPk=
+From: Sender Name <example@example.com>
+Date: Tue, 19 Jul 2016 09:06:21 -0600
+Message-ID: <CAN_P_JNa25--hzm5=-ES9cnxgWa+h+E49OOAS7sPpV0gsoXCOw@mail.gmail.com>
+Subject: Hello
+To: example@example.com
+Content-Type: multipart/mixed; boundary=001a11447dc881e40f0537fe6d5a
+
+--001a11447dc881e40f0537fe6d5a
+Content-Type: multipart/alternative; boundary=001a11447dc881e40b0537fe6d58
+
+--001a11447dc881e40b0537fe6d58
+Content-Type: text/plain; charset=UTF-8
+
+This is a test email with 1 attachment.
+
+--001a11447dc881e40b0537fe6d58--
+
+--001a11447dc881e40f0537fe6d5a--
+
+--boundary123
+Content-Disposition: form-data; name="from"
+
+Sender Name <example@example.com>
+--boundary123
+Content-Disposition: form-data; name="to"
+
+example@example.com
+--boundary123
+Content-Disposition: form-data; name="subject"
+
+Hello
+--boundary123
+Content-Disposition: form-data; name="envelope"
+
+{"to":["example@example.com"],"from":"example@example.com"}
+--boundary123
+Content-Disposition: form-data; name="sender_ip"
+
+209.85.214.45
+--boundary123
+Content-Disposition: form-data; name="SPF"
+
+pass
+--boundary123
+Content-Disposition: form-data; name="dkim"
+
+{"@sendgrid.com":"pass"}
+--boundary123
+Content-Disposition: form-data; name="spam_score"
+
+0.353
+--boundary123--

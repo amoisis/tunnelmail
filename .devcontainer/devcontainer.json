@@ -1,0 +1,41 @@
+{
+  "name": "TunnelMail",
+  "dockerComposeFile": [
+    "docker-compose.yml"
+  ],
+  "service": "app",
+  "workspaceFolder": "/workspaces/tunnelmail",
+  "shutdownAction": "stopCompose",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "go.toolsManagement.checkForUpdates": "off",
+        "go.useLanguageServer": true
+      }
+    }
+  },
+  "forwardPorts": [8080, 1025, 8025],
+  "portsAttributes": {
+    "8080": {
+      "label": "Gateway HTTP",
+      "onAutoForward": "notify"
+    },
+    "1025": {
+      "label": "SMTP",
+      "onAutoForward": "silent"
+    },
+    "8025": {
+      "label": "MailHog UI",
+      "onAutoForward": "openPreview"
+    }
+  },
+  "postCreateCommand": "go version && go env GOPATH",
+  "remoteEnv": {
+    "SMTP_HOST": "mailhog:1025",
+    "HTTP_PORT": "8080"
+  }
+}

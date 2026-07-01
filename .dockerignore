@@ -1,0 +1,11 @@
+.git
+.github
+.vscode
+.devcontainer
+README.md
+test-payload.txt
+test.sh
+docker-compose.yml
+*.md
+.gitignore
+.DS_Store
