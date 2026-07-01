@@ -33,9 +33,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Resolve and tidy Go module dependencies
+        run: |
+          go mod download
+          go mod tidy
+          go mod verify
+
       - name: Run unit tests with coverage
         run: |
-          go test ./... -v -coverprofile=coverage.out
+          go test ./... -mod=readonly -v -coverprofile=coverage.out
           go tool cover -func=coverage.out
 
   build:
