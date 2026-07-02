@@ -28,14 +28,18 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	otelLog "go.opentelemetry.io/otel/log"
 	otelGlobal "go.opentelemetry.io/otel/log/global"
 	otelMetric "go.opentelemetry.io/otel/metric"
+	logsdk "go.opentelemetry.io/otel/sdk/log"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
-	logsdk "go.opentelemetry.io/otel/sdk/log"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
@@ -334,6 +338,17 @@ func initTelemetry() (func(context.Context) error, error) {
 	)
 	otel.SetMeterProvider(meterProvider)
 
+	traceExporter, err := otlptracehttp.New(context.Background(), otlptracehttp.WithEndpoint(hostPort))
+	if err != nil {
+		return nil, err
+	}
+
+	traceProvider := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(traceExporter),
+		sdktrace.WithResource(res),
+	)
+	otel.SetTracerProvider(traceProvider)
+
 	logExporter, err := otlploghttp.New(context.Background(), otlploghttp.WithEndpoint(hostPort))
 	if err != nil {
 		return nil, err
@@ -364,6 +379,7 @@ func initTelemetry() (func(context.Context) error, error) {
 
 	return func(ctx context.Context) error {
 		_ = meterProvider.Shutdown(ctx)
+		_ = traceProvider.Shutdown(ctx)
 		_ = loggerProvider.Shutdown(ctx)
 		return nil
 	}, nil
@@ -422,6 +438,15 @@ func main() {
     // Main handler with all middleware
     http.HandleFunc("/inbound", func(w http.ResponseWriter, r *http.Request) {
         clientIP := getClientIP(r)
+        tracer := otel.Tracer("tunnelmail")
+        ctx, span := tracer.Start(r.Context(), "inbound.request")
+        defer span.End()
+        r = r.WithContext(ctx)
+        span.SetAttributes(
+            attribute.String("client.ip", clientIP),
+            attribute.String("http.method", r.Method),
+            attribute.String("http.route", "/inbound"),
+        )
 
         logger := &RequestLogger{
             method:    r.Method,
@@ -436,6 +461,7 @@ func main() {
         if !rateLimiter.Allow(clientIP, rpsLimit) {
             metrics.IncrementRateLimit()
             metrics.IncrementError()
+            span.SetStatus(codes.Error, "rate limit exceeded")
             sendErrorResponse(w, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "rate limit exceeded")
             logger.Log(http.StatusTooManyRequests, nil)
             metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
@@ -446,6 +472,7 @@ func main() {
         if !semaphore.Acquire() {
             metrics.IncrementTooBusy()
             metrics.IncrementError()
+            span.SetStatus(codes.Error, "service too busy")
             sendErrorResponse(w, http.StatusTooManyRequests, "TOO_BUSY", "service too busy")
             logger.Log(http.StatusTooManyRequests, nil)
             metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
@@ -457,6 +484,7 @@ func main() {
         if r.ContentLength > 0 && r.ContentLength > maxRequestSize {
             metrics.IncrementPayloadTooLarge()
             metrics.IncrementError()
+            span.SetStatus(codes.Error, "request body too large")
             sendErrorResponse(w, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "request body too large")
             logger.Log(http.StatusRequestEntityTooLarge, nil)
             metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
@@ -465,6 +493,8 @@ func main() {
 
         if err := r.ParseMultipartForm(maxRequestSize); err != nil {
             metrics.IncrementError()
+            span.RecordError(err)
+            span.SetStatus(codes.Error, "invalid multipart form")
             sendErrorResponse(w, http.StatusBadRequest, "INVALID_MULTIPART", "invalid multipart form")
             logger.Log(http.StatusBadRequest, err)
             metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
@@ -474,6 +504,8 @@ func main() {
         envelopeFrom, recipients, err := parseEnvelope(r)
         if err != nil {
             metrics.IncrementError()
+            span.RecordError(err)
+            span.SetStatus(codes.Error, err.Error())
             sendErrorResponse(w, http.StatusBadRequest, "INVALID_ENVELOPE", err.Error())
             logger.Log(http.StatusBadRequest, err)
             metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
@@ -484,6 +516,8 @@ func main() {
         messageData, err := buildMessage(r, rawEmail, envelopeFrom, recipients)
         if err != nil {
             metrics.IncrementError()
+            span.RecordError(err)
+            span.SetStatus(codes.Error, "failed to build message")
             log.Printf("build message error: %v", err)
             sendErrorResponse(w, http.StatusBadRequest, "BUILD_FAILED", "failed to build message")
             logger.Log(http.StatusBadRequest, err)
@@ -495,6 +529,8 @@ func main() {
         client, err := dialSMTPWithTimeout(smtpHost, smtpTimeout)
         if err != nil {
             metrics.IncrementError()
+            span.RecordError(err)
+            span.SetStatus(codes.Error, "SMTP connection failed")
             log.Printf("smtp dial error: %v", err)
             sendErrorResponse(w, http.StatusBadGateway, "SMTP_CONNECT_FAILED", "SMTP connection failed")
             logger.Log(http.StatusBadGateway, err)
@@ -505,6 +541,8 @@ func main() {
 
         if err := client.Mail(envelopeFrom); err != nil {
             metrics.IncrementError()
+            span.RecordError(err)
+            span.SetStatus(codes.Error, "SMTP operation failed")
             log.Printf("smtp mail error: %v", err)
             sendErrorResponse(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP operation failed")
             logger.Log(http.StatusBadGateway, err)
@@ -515,6 +553,8 @@ func main() {
         for _, recipient := range recipients {
             if err := client.Rcpt(recipient); err != nil {
                 metrics.IncrementError()
+                span.RecordError(err)
+                span.SetStatus(codes.Error, "SMTP operation failed")
             	log.Printf("smtp rcpt error: %v", err)
             	sendErrorResponse(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP operation failed")
             	logger.Log(http.StatusBadGateway, err)
@@ -526,6 +566,8 @@ func main() {
         wc, err := client.Data()
         if err != nil {
             metrics.IncrementError()
+            span.RecordError(err)
+            span.SetStatus(codes.Error, "SMTP operation failed")
             log.Printf("smtp data error: %v", err)
             sendErrorResponse(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP operation failed")
             logger.Log(http.StatusBadGateway, err)
@@ -537,6 +579,8 @@ func main() {
         _, err = wc.Write(messageData)
         if err != nil {
             metrics.IncrementError()
+            span.RecordError(err)
+            span.SetStatus(codes.Error, "SMTP operation failed")
             log.Printf("smtp write error: %v", err)
             sendErrorResponse(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP operation failed")
             logger.Log(http.StatusBadGateway, err)
@@ -545,9 +589,13 @@ func main() {
         }
 
         if err := client.Quit(); err != nil {
+            metrics.IncrementError()
+            span.RecordError(err)
+            span.SetStatus(codes.Error, "SMTP operation failed")
             log.Printf("smtp quit error: %v", err)
         }
 
+        span.SetStatus(codes.Ok, "accepted")
         log.Printf("forwarded mail from %s to %v (%d bytes)", envelopeFrom, recipients, len(messageData))
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(http.StatusOK)

@@ -39,6 +39,8 @@ A secure, production-ready HTTP-to-SMTP gateway for inbound webhook payloads (e.
 | `MAX_REQUEST_SIZE` | int | `104857600` | Maximum request body size in bytes (default 100MB). Includes multipart form data and attachments. |
 | `RATE_LIMIT_RPS` | float | `10` | Maximum requests per second per client IP. Enforced per unique source IP. |
 | `MAX_CONCURRENT_REQUESTS` | int | `100` | Maximum concurrent requests allowed. Excess requests receive 429 (Too Busy) response. |
+| `OTEL_COLLECTOR_ENDPOINT` | string | unset | Optional OTLP endpoint for exporting metrics, logs, and traces. Supports values like `http://collector:4318`. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | string | unset | Fallback OTLP endpoint if `OTEL_COLLECTOR_ENDPOINT` is not set. |
 
 ## API Reference
 
@@ -216,6 +218,20 @@ spec:
             cpu: 500m
             memory: 512Mi
 ```
+
+## Observability
+
+The gateway configures OpenTelemetry for metrics, logs, and traces when an OTLP endpoint is provided. Metrics and logs are emitted through the OTLP HTTP exporter, and request spans are created for `/inbound` traffic.
+
+### Running with a local collector
+
+Example with a local OTel collector:
+
+```bash
+OTEL_COLLECTOR_ENDPOINT=http://localhost:4318 SMTP_HOST=mailhog:1025 go run ./src
+```
+
+Then verify that spans, logs, and metrics appear in your collector backend or its UI.
 
 ## Testing
 
