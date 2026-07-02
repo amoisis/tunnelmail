@@ -1,0 +1,12 @@
+module tunnelmail
+
+go 1.26
+
+require (
+	go.opentelemetry.io/otel v1.44.0
+	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.53.0
+	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v0.53.0
+	go.opentelemetry.io/otel/log v0.53.0
+	go.opentelemetry.io/otel/sdk v1.44.0
+	go.opentelemetry.io/otel/semconv v1.44.0
+)

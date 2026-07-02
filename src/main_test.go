@@ -16,7 +16,7 @@ func TestSanitizeHeader(t *testing.T) {
 		expected string
 	}{
 		{"normal header", "normal header"},
-		{"header\nwith\nnewlines", "headerwithNewlines"},
+		{"header\nwith\nnewlines", "headerwithnewlines"},
 		{"header\rwith\rcarriage", "headerwithcarriage"},
 		{"header\r\nwith\r\nboth", "headerwithboth"},
 		{"", ""},
@@ -78,8 +78,7 @@ func TestParseEnvInt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Note: In real test, you'd use os.Setenv/Unsetenv
-			// This is simplified; actual tests would mock env vars
+			t.Setenv(tt.envKey, tt.setEnv)
 			result := parseEnvInt(tt.envKey, tt.defaultVal)
 			if result != tt.expected {
 				t.Errorf("parseEnvInt(%q, %d) = %d, want %d", tt.envKey, tt.defaultVal, result, tt.expected)
@@ -263,28 +262,18 @@ func TestGetClientIP(t *testing.T) {
 func TestSemaphore(t *testing.T) {
 	sem := NewSemaphore(2)
 
-	// First acquire should work
-	select {
-	case <-sem.Acquire():
+	if !sem.Acquire() {
 		defer sem.Release()
-	default:
 		t.Error("first acquire should succeed")
 	}
 
-	// Second acquire should work
-	select {
-	case <-sem.Acquire():
+	if !sem.Acquire() {
 		defer sem.Release()
-	default:
 		t.Error("second acquire should succeed")
 	}
 
-	// Third acquire should fail (semaphore size is 2)
-	select {
-	case <-sem.Acquire():
+	if sem.Acquire() {
 		t.Error("third acquire should fail when semaphore is full")
-	default:
-		// Expected
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"net/textproto"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,8 +28,15 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/stdout/metric"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+	otelLog "go.opentelemetry.io/otel/log"
+	otelGlobal "go.opentelemetry.io/otel/log/global"
+	otelMetric "go.opentelemetry.io/otel/metric"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	logsdk "go.opentelemetry.io/otel/sdk/log"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 // Task 1: CRLF Injection Prevention
@@ -155,8 +163,13 @@ func NewSemaphore(n int) Semaphore {
 	return make(Semaphore, n)
 }
 
-func (s Semaphore) Acquire() {
-	s <- struct{}{}
+func (s Semaphore) Acquire() bool {
+	select {
+	case s <- struct{}{}:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s Semaphore) Release() {
@@ -180,6 +193,9 @@ func (rl *RequestLogger) Log(statusCode int, err error) {
 	} else {
 		log.Printf("[%s] %s %s %d %dms",
 			rl.remoteIP, rl.method, rl.path, statusCode, duration.Milliseconds())
+	}
+	if globalTelemetry != nil {
+		globalTelemetry.emitLog(context.Background(), rl.method, rl.path, rl.remoteIP, statusCode, duration, err)
 	}
 }
 
@@ -215,21 +231,142 @@ type Metrics struct {
 	mu                sync.RWMutex
 }
 
-func (m *Metrics) IncrementRequest()          { atomic.AddInt64(&m.requestCount, 1) }
-func (m *Metrics) IncrementError()            { atomic.AddInt64(&m.requestErrors, 1) }
+type telemetrySink struct {
+	requestCounter      otelMetric.Int64Counter
+	errorCounter        otelMetric.Int64Counter
+	latencyHistogram    otelMetric.Int64Histogram
+	logger              otelLog.Logger
+}
+
+var globalTelemetry *telemetrySink
+
+func (ts *telemetrySink) emitLog(ctx context.Context, method, path, remoteIP string, statusCode int, duration time.Duration, err error) {
+	if ts == nil || ts.logger == nil {
+		return
+	}
+	record := otelLog.Record{}
+	record.SetBody(otelLog.StringValue(fmt.Sprintf("%s %s from=%s status=%d duration_ms=%d", method, path, remoteIP, statusCode, duration.Milliseconds())))
+	if err != nil {
+		record.AddAttributes(otelLog.String("error", err.Error()))
+	}
+	ts.logger.Emit(ctx, record)
+}
+
+func (m *Metrics) IncrementRequest() {
+	atomic.AddInt64(&m.requestCount, 1)
+	if globalTelemetry != nil {
+		globalTelemetry.requestCounter.Add(context.Background(), 1)
+	}
+}
+func (m *Metrics) IncrementError() {
+	atomic.AddInt64(&m.requestErrors, 1)
+	if globalTelemetry != nil {
+		globalTelemetry.errorCounter.Add(context.Background(), 1)
+	}
+}
 func (m *Metrics) IncrementRateLimit()        { atomic.AddInt64(&m.rateLimitExceeded, 1) }
 func (m *Metrics) IncrementTooBusy()          { atomic.AddInt64(&m.tooBusy, 1) }
 func (m *Metrics) IncrementPayloadTooLarge()  { atomic.AddInt64(&m.payloadTooLarge, 1) }
-func (m *Metrics) AddLatency(ms int64)        { atomic.AddInt64(&m.requestLatencyMs, ms) }
+func (m *Metrics) AddLatency(ms int64) {
+	atomic.AddInt64(&m.requestLatencyMs, ms)
+	if globalTelemetry != nil {
+		globalTelemetry.latencyHistogram.Record(context.Background(), ms)
+	}
+}
 func (m *Metrics) GetStats() map[string]int64 {
 	return map[string]int64{
-		"total_requests":         atomic.LoadInt64(&m.requestCount),
-		"total_errors":           atomic.LoadInt64(&m.requestErrors),
-		"rate_limit_exceeded":    atomic.LoadInt64(&m.rateLimitExceeded),
-		"too_busy":               atomic.LoadInt64(&m.tooBusy),
-		"payload_too_large":      atomic.LoadInt64(&m.payloadTooLarge),
-		"total_latency_ms":       atomic.LoadInt64(&m.requestLatencyMs),
+		"total_requests":      atomic.LoadInt64(&m.requestCount),
+		"total_errors":        atomic.LoadInt64(&m.requestErrors),
+		"rate_limit_exceeded": atomic.LoadInt64(&m.rateLimitExceeded),
+		"too_busy":            atomic.LoadInt64(&m.tooBusy),
+		"payload_too_large":   atomic.LoadInt64(&m.payloadTooLarge),
+		"total_latency_ms":    atomic.LoadInt64(&m.requestLatencyMs),
 	}
+}
+
+func resolveCollectorEndpoint() string {
+	if endpoint := strings.TrimSpace(os.Getenv("OTEL_COLLECTOR_ENDPOINT")); endpoint != "" {
+		return endpoint
+	}
+	return strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+}
+
+func initTelemetry() (func(context.Context) error, error) {
+	endpoint := resolveCollectorEndpoint()
+	if endpoint == "" {
+		return func(context.Context) error { return nil }, nil
+	}
+
+	parsedURL, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	hostPort := parsedURL.Host
+	if hostPort == "" {
+		hostPort = endpoint
+	}
+	if parsedURL.Scheme == "http" {
+		hostPort = strings.TrimPrefix(hostPort, "http://")
+	} else if parsedURL.Scheme == "https" {
+		hostPort = strings.TrimPrefix(hostPort, "https://")
+	}
+
+	res, err := resource.New(context.Background(),
+		resource.WithAttributes(
+			semconv.ServiceName("tunnelmail"),
+			semconv.ServiceVersion("dev"),
+		),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	metricExporter, err := otlpmetrichttp.New(context.Background(), otlpmetrichttp.WithEndpoint(hostPort))
+	if err != nil {
+		return nil, err
+	}
+
+	metricReader := metricsdk.NewPeriodicReader(metricExporter)
+	meterProvider := metricsdk.NewMeterProvider(
+		metricsdk.WithResource(res),
+		metricsdk.WithReader(metricReader),
+	)
+	otel.SetMeterProvider(meterProvider)
+
+	logExporter, err := otlploghttp.New(context.Background(), otlploghttp.WithEndpoint(hostPort))
+	if err != nil {
+		return nil, err
+	}
+
+	logProcessor := logsdk.NewSimpleProcessor(logExporter)
+	loggerProvider := logsdk.NewLoggerProvider(
+		logsdk.WithResource(res),
+		logsdk.WithProcessor(logProcessor),
+	)
+	otelGlobal.SetLoggerProvider(loggerProvider)
+
+	meter := otel.Meter("tunnelmail")
+	requestCounter, err := meter.Int64Counter("tunnelmail.requests")
+	if err != nil {
+		return nil, err
+	}
+	errorCounter, err := meter.Int64Counter("tunnelmail.errors")
+	if err != nil {
+		return nil, err
+	}
+	latencyHistogram, err := meter.Int64Histogram("tunnelmail.request_latency_ms")
+	if err != nil {
+		return nil, err
+	}
+	logger := loggerProvider.Logger("tunnelmail")
+	globalTelemetry = &telemetrySink{requestCounter: requestCounter, errorCounter: errorCounter, latencyHistogram: latencyHistogram, logger: logger}
+
+	return func(ctx context.Context) error {
+		_ = meterProvider.Shutdown(ctx)
+		_ = loggerProvider.Shutdown(ctx)
+		return nil
+	}, nil
 }
 
 func main() {
@@ -257,6 +394,18 @@ func main() {
 
     // Initialize metrics
     metrics := &Metrics{}
+
+    shutdownTelemetry, err := initTelemetry()
+    if err != nil {
+        log.Printf("telemetry init error: %v", err)
+    }
+    if shutdownTelemetry != nil {
+        defer func() {
+            if shutdownErr := shutdownTelemetry(context.Background()); shutdownErr != nil {
+                log.Printf("telemetry shutdown error: %v", shutdownErr)
+            }
+        }()
+    }
 
     // Task 17: Health Check Endpoint with Metrics
     http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -294,10 +443,7 @@ func main() {
         }
 
         // Task 8: Concurrent limit check
-        select {
-        case semaphore.Acquire():
-            defer semaphore.Release()
-        default:
+        if !semaphore.Acquire() {
             metrics.IncrementTooBusy()
             metrics.IncrementError()
             sendErrorResponse(w, http.StatusTooManyRequests, "TOO_BUSY", "service too busy")
@@ -305,6 +451,7 @@ func main() {
             metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
             return
         }
+        defer semaphore.Release()
 
         // Task 3: Enforce request size limit
         if r.ContentLength > 0 && r.ContentLength > maxRequestSize {
