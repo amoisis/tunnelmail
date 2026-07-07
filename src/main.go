@@ -198,6 +198,7 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 	if useProxyProtocol && clientIP != "" {
 		proxyHeader, err := buildProxyHeader(clientIP, host)
 		if err == nil {
+			log.Printf("sending PROXY header: %q", strings.TrimSpace(proxyHeader))
 			if _, writeErr := conn.Write([]byte(proxyHeader)); writeErr != nil {
 				conn.Close()
 				return nil, fmt.Errorf("failed to write PROXY header: %w", writeErr)
@@ -401,36 +402,62 @@ func getClientIP(r *http.Request) string {
 	return clientIP
 }
 
+// isUsableClientIP reports whether an IP address is suitable for use as the
+// original client IP. Link-local, loopback, and unspecified addresses are
+// rejected because they cannot be used in PROXY Protocol headers or for
+// meaningful spam filtering.
+func isUsableClientIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	return true
+}
+
 // extractClientIP returns the original client IP provided by an upstream proxy.
 // It prefers explicit FormData fields (client_ip, sender_ip) sent by the proxy,
 // then Cloudflare-specific headers, then X-Forwarded-For, and finally the
-// connection's remote address.
+// connection's remote address. Invalid/local-only IPs are skipped.
 func extractClientIP(r *http.Request) string {
-	if r.MultipartForm != nil {
-		if ip := strings.TrimSpace(r.FormValue("client_ip")); ip != "" {
-			return ip
-		}
-		if ip := strings.TrimSpace(r.FormValue("sender_ip")); ip != "" {
-			return ip
-		}
+	candidates := []string{
+		r.FormValue("client_ip"),
+		r.FormValue("sender_ip"),
+		r.Header.Get("CF-Connecting-IP"),
+		r.Header.Get("X-Cloudflare-Client-IP"),
 	}
-
-	if ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); ip != "" {
-		return ip
-	}
-	if ip := strings.TrimSpace(r.Header.Get("X-Cloudflare-Client-IP")); ip != "" {
-		return ip
-	}
-
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.Split(strings.TrimSpace(xff), ",")[0]
+		parts := strings.Split(xff, ",")
+		for _, part := range parts {
+			candidates = append(candidates, strings.TrimSpace(part))
+		}
+	}
+
+	for i, candidate := range candidates {
+		ip := strings.TrimSpace(candidate)
+		if ip == "" {
+			continue
+		}
+		if isUsableClientIP(ip) {
+			log.Printf("client_ip selected candidate %d: %s", i, ip)
+			return ip
+		}
+		log.Printf("client_ip rejected candidate %d (%s): unusable address", i, ip)
 	}
 
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if host != "" {
+	if host != "" && isUsableClientIP(host) {
+		log.Printf("client_ip fallback to RemoteAddr host: %s", host)
 		return host
 	}
-	return r.RemoteAddr
+	if isUsableClientIP(r.RemoteAddr) {
+		log.Printf("client_ip fallback to RemoteAddr: %s", r.RemoteAddr)
+		return r.RemoteAddr
+	}
+	log.Printf("client_ip: no usable address found (RemoteAddr=%s)", r.RemoteAddr)
+	return ""
 }
 
 // Task 10: Metrics collection for observability
@@ -620,6 +647,7 @@ func main() {
         log.Fatalf("SMTP_ENVELOPE_FROM is not a valid email address: %s", smtpEnvelopeFrom)
     }
     smtpUseProxyProtocol := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_USE_PROXY_PROTOCOL")), "true")
+    log.Printf("config: SMTP_HOST=%s SMTP_EHLO_HOST=%s SMTP_USE_PROXY_PROTOCOL=%v", smtpHost, smtpEhloHost, smtpUseProxyProtocol)
     maxRequestSize := parseEnvInt64("MAX_REQUEST_SIZE", 100<<20) // 100MB default
     rpsLimit := float64(parseEnvInt("RATE_LIMIT_RPS", 10))
     concurrentLimit := parseEnvInt("MAX_CONCURRENT_REQUESTS", 100)
