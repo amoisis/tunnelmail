@@ -14,7 +14,6 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
-	"net/smtp"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -174,8 +173,23 @@ func buildProxyHeader(srcIP, dstHost string) (string, error) {
 	return fmt.Sprintf("PROXY %s %s %s 0 %d\r\n", family, src.String(), dstStr, dstPort), nil
 }
 
-// Task 4: SMTP Connection Timeout
-func dialSMTPWithTimeout(host, localName, clientIP string, useProxyProtocol bool, timeout time.Duration) (*smtp.Client, error) {
+// smtpResult holds the parsed response from a successful DATA acceptance so
+// the upstream queue ID and SMTP code can be returned to the HTTP caller.
+type smtpResult struct {
+	Code    int    `json:"smtp_code"`
+	Message string `json:"smtp_message"`
+}
+
+// smtpSession is a minimal SMTP client that gives us full control over the
+// command/response stream, including the ability to capture the queue ID
+// returned after the DATA terminator.
+type smtpSession struct {
+	conn    net.Conn
+	text    *textproto.Conn
+	timeout time.Duration
+}
+
+func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, timeout time.Duration) (*smtpSession, error) {
 	conn, err := net.DialTimeout("tcp", host, timeout)
 	if err != nil {
 		return nil, err
@@ -193,18 +207,87 @@ func dialSMTPWithTimeout(host, localName, clientIP string, useProxyProtocol bool
 		}
 	}
 
-	client, err := smtp.NewClient(conn, host)
-	if err != nil {
-		conn.Close()
+	s := &smtpSession{
+		conn:    conn,
+		text:    textproto.NewConn(conn),
+		timeout: timeout,
+	}
+
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		s.Close()
 		return nil, err
 	}
-	// net/smtp.NewClient uses its second argument as serverName (for TLS),
-	// but the EHLO hostname defaults to "localhost" unless we call Hello.
-	if err := client.Hello(localName); err != nil {
-		client.Close()
+
+	// Read the server banner.
+	if _, _, err := s.text.ReadResponse(220); err != nil {
+		s.Close()
 		return nil, err
 	}
-	return client, nil
+
+	// Send EHLO/HELO.
+	if err := s.hello(localName); err != nil {
+		s.Close()
+		return nil, err
+	}
+
+	return s, nil
+}
+
+func (s *smtpSession) hello(localName string) error {
+	if err := s.text.PrintfLine("EHLO %s", localName); err != nil {
+		return err
+	}
+	if _, _, err := s.text.ReadResponse(250); err != nil {
+		// Fall back to HELO if EHLO is not supported.
+		if err := s.text.PrintfLine("HELO %s", localName); err != nil {
+			return err
+		}
+		_, _, err = s.text.ReadResponse(250)
+		return err
+	}
+	return nil
+}
+
+func (s *smtpSession) Mail(from string) error {
+	if err := s.text.PrintfLine("MAIL FROM:<%s>", from); err != nil {
+		return err
+	}
+	_, _, err := s.text.ReadResponse(250)
+	return err
+}
+
+func (s *smtpSession) Rcpt(to string) error {
+	if err := s.text.PrintfLine("RCPT TO:<%s>", to); err != nil {
+		return err
+	}
+	_, _, err := s.text.ReadResponse(25) // 250 or 251
+	return err
+}
+
+func (s *smtpSession) Data() (io.WriteCloser, error) {
+	if err := s.text.PrintfLine("DATA"); err != nil {
+		return nil, err
+	}
+	if _, _, err := s.text.ReadResponse(354); err != nil {
+		return nil, err
+	}
+	return s.text.DotWriter(), nil
+}
+
+func (s *smtpSession) readFinalDataResponse() (int, string, error) {
+	return s.text.ReadResponse(250)
+}
+
+func (s *smtpSession) Quit() error {
+	if err := s.text.PrintfLine("QUIT"); err != nil {
+		return err
+	}
+	_, _, err := s.text.ReadResponse(221)
+	return err
+}
+
+func (s *smtpSession) Close() error {
+	return s.text.Close()
 }
 
 // Task 6: SSRF Prevention - Block private IPs
@@ -675,7 +758,7 @@ func main() {
         }
 
         // Task 4: Use SMTP connection with timeout and proper cleanup (Task 5)
-        client, err := dialSMTPWithTimeout(smtpHost, smtpEhloHost, clientIP, smtpUseProxyProtocol, smtpTimeout)
+        client, err := newSMTPSession(smtpHost, smtpEhloHost, clientIP, smtpUseProxyProtocol, smtpTimeout)
         if err != nil {
             metrics.IncrementError()
             span.RecordError(err)
@@ -724,6 +807,11 @@ func main() {
             return
         }
 
+        // Ensure the message ends with CRLF so the DATA terminator is on its own line.
+        if len(messageData) > 0 && !bytes.HasSuffix(messageData, []byte("\r\n")) {
+            messageData = append(messageData, '\r', '\n')
+        }
+
         _, err = wc.Write(messageData)
         if err != nil {
             wc.Close()
@@ -750,6 +838,19 @@ func main() {
             return
         }
 
+        // Capture the actual SMTP response code and message (queue ID).
+        smtpCode, smtpMsg, err := client.readFinalDataResponse()
+        if err != nil {
+            metrics.IncrementError()
+            span.RecordError(err)
+            span.SetStatus(codes.Error, "SMTP DATA acceptance failed")
+            log.Printf("smtp data response error: %v", err)
+            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP server rejected message data", err.Error())
+            logger.Log(http.StatusBadGateway, err)
+            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+            return
+        }
+
         if err := client.Quit(); err != nil {
             // QUIT failures after successful DATA acceptance are not fatal;
             // the message has already been queued by the server.
@@ -757,10 +858,14 @@ func main() {
         }
 
         span.SetStatus(codes.Ok, "accepted")
-        log.Printf("forwarded mail from %s to %v (%d bytes)", envelopeFrom, recipients, len(messageData))
+        log.Printf("forwarded mail from %s to %v (%d bytes) smtp=%d %s", envelopeFrom, recipients, len(messageData), smtpCode, smtpMsg)
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(http.StatusOK)
-        json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "status":       "accepted",
+            "smtp_code":    smtpCode,
+            "smtp_message": smtpMsg,
+        })
         logger.Log(http.StatusOK, nil)
         metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
     })

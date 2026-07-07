@@ -64,7 +64,11 @@ Receives webhook payload and forwards to SMTP server.
 
 **Success Response** (200 OK):
 ```json
-{"status": "accepted"}
+{
+  "status": "accepted",
+  "smtp_code": 250,
+  "smtp_message": "2.0.0 Message queued with id ..."
+}
 ```
 
 **Error Response** (4xx/5xx):
