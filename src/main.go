@@ -58,6 +58,17 @@ func normalizeCRLF(s string) string {
 	return strings.ReplaceAll(s, "\n", "\r\n")
 }
 
+// injectHeader inserts a header into an RFC 5322 message after the existing
+// headers and before the body separator. The message is assumed to use CRLF
+// line endings.
+func injectHeader(message, name, value string) string {
+	idx := strings.Index(message, "\r\n\r\n")
+	if idx == -1 {
+		return message + "\r\n" + name + ": " + value + "\r\n"
+	}
+	return message[:idx+2] + name + ": " + value + message[idx+2:]
+}
+
 // Task 2: Email Validation
 func isValidEmail(email string) bool {
 	email = strings.TrimSpace(email)
@@ -114,12 +125,74 @@ func parseEnvInt64(key string, defaultVal int64) int64 {
 	return parsed
 }
 
+// buildProxyHeader constructs a HAProxy PROXY Protocol v1 header so the
+// upstream SMTP server can see the original client IP. The destination address
+// is resolved from the SMTP host; if it cannot be determined, a placeholder is
+// used. Source port is unknown and reported as 0.
+func buildProxyHeader(srcIP, dstHost string) (string, error) {
+	src := net.ParseIP(srcIP)
+	if src == nil {
+		return "", fmt.Errorf("invalid source IP: %s", srcIP)
+	}
+
+	dstHostOnly, dstPortStr, err := net.SplitHostPort(dstHost)
+	if err != nil {
+		dstHostOnly = dstHost
+		dstPortStr = "25"
+	}
+	dstPort, err := strconv.Atoi(dstPortStr)
+	if err != nil {
+		dstPort = 25
+	}
+
+	var dst net.IP
+	if parsed := net.ParseIP(dstHostOnly); parsed != nil {
+		dst = parsed
+	} else {
+		if ips, err := net.LookupIP(dstHostOnly); err == nil && len(ips) > 0 {
+			dst = ips[0]
+		}
+	}
+
+	var family, dstStr string
+	if src.To4() != nil {
+		family = "TCP4"
+		if dst != nil && dst.To4() != nil {
+			dstStr = dst.String()
+		} else {
+			dstStr = "0.0.0.0"
+		}
+	} else {
+		family = "TCP6"
+		if dst != nil {
+			dstStr = dst.String()
+		} else {
+			dstStr = "::"
+		}
+	}
+
+	return fmt.Sprintf("PROXY %s %s %s 0 %d\r\n", family, src.String(), dstStr, dstPort), nil
+}
+
 // Task 4: SMTP Connection Timeout
-func dialSMTPWithTimeout(host, localName string, timeout time.Duration) (*smtp.Client, error) {
+func dialSMTPWithTimeout(host, localName, clientIP string, useProxyProtocol bool, timeout time.Duration) (*smtp.Client, error) {
 	conn, err := net.DialTimeout("tcp", host, timeout)
 	if err != nil {
 		return nil, err
 	}
+
+	if useProxyProtocol && clientIP != "" {
+		proxyHeader, err := buildProxyHeader(clientIP, host)
+		if err == nil {
+			if _, writeErr := conn.Write([]byte(proxyHeader)); writeErr != nil {
+				conn.Close()
+				return nil, fmt.Errorf("failed to write PROXY header: %w", writeErr)
+			}
+		} else {
+			log.Printf("invalid client IP for PROXY protocol: %v", err)
+		}
+	}
+
 	client, err := smtp.NewClient(conn, host)
 	if err != nil {
 		conn.Close()
@@ -243,6 +316,38 @@ func getClientIP(r *http.Request) string {
 		clientIP = strings.Split(strings.TrimSpace(xff), ",")[0]
 	}
 	return clientIP
+}
+
+// extractClientIP returns the original client IP provided by an upstream proxy.
+// It prefers explicit FormData fields (client_ip, sender_ip) sent by the proxy,
+// then Cloudflare-specific headers, then X-Forwarded-For, and finally the
+// connection's remote address.
+func extractClientIP(r *http.Request) string {
+	if r.MultipartForm != nil {
+		if ip := strings.TrimSpace(r.FormValue("client_ip")); ip != "" {
+			return ip
+		}
+		if ip := strings.TrimSpace(r.FormValue("sender_ip")); ip != "" {
+			return ip
+		}
+	}
+
+	if ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); ip != "" {
+		return ip
+	}
+	if ip := strings.TrimSpace(r.Header.Get("X-Cloudflare-Client-IP")); ip != "" {
+		return ip
+	}
+
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		return strings.Split(strings.TrimSpace(xff), ",")[0]
+	}
+
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if host != "" {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 // Task 10: Metrics collection for observability
@@ -427,6 +532,11 @@ func main() {
             smtpEhloHost = "tunnelmail.local"
         }
     }
+    smtpEnvelopeFrom := strings.TrimSpace(os.Getenv("SMTP_ENVELOPE_FROM"))
+    if smtpEnvelopeFrom != "" && !isValidEmail(smtpEnvelopeFrom) {
+        log.Fatalf("SMTP_ENVELOPE_FROM is not a valid email address: %s", smtpEnvelopeFrom)
+    }
+    smtpUseProxyProtocol := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_USE_PROXY_PROTOCOL")), "true")
     maxRequestSize := parseEnvInt64("MAX_REQUEST_SIZE", 100<<20) // 100MB default
     rpsLimit := float64(parseEnvInt("RATE_LIMIT_RPS", 10))
     concurrentLimit := parseEnvInt("MAX_CONCURRENT_REQUESTS", 100)
@@ -466,36 +576,19 @@ func main() {
 
     // Main handler with all middleware
     http.HandleFunc("/inbound", func(w http.ResponseWriter, r *http.Request) {
-        clientIP := getClientIP(r)
         tracer := otel.Tracer("tunnelmail")
         ctx, span := tracer.Start(r.Context(), "inbound.request")
         defer span.End()
         r = r.WithContext(ctx)
-        span.SetAttributes(
-            attribute.String("client.ip", clientIP),
-            attribute.String("http.method", r.Method),
-            attribute.String("http.route", "/inbound"),
-        )
 
         logger := &RequestLogger{
             method:    r.Method,
             path:      r.RequestURI,
-            remoteIP:  clientIP,
+            remoteIP:  getClientIP(r),
             startTime: time.Now(),
         }
 
         metrics.IncrementRequest()
-
-        // Task 7: Rate limit check
-        if !rateLimiter.Allow(clientIP, rpsLimit) {
-            metrics.IncrementRateLimit()
-            metrics.IncrementError()
-            span.SetStatus(codes.Error, "rate limit exceeded")
-            sendErrorResponse(w, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "rate limit exceeded")
-            logger.Log(http.StatusTooManyRequests, nil)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
 
         // Task 8: Concurrent limit check
         if !semaphore.Acquire() {
@@ -530,6 +623,26 @@ func main() {
             return
         }
 
+        // Extract the real client IP from FormData/headers now that the form is parsed.
+        clientIP := extractClientIP(r)
+        logger.remoteIP = clientIP
+        span.SetAttributes(
+            attribute.String("client.ip", clientIP),
+            attribute.String("http.method", r.Method),
+            attribute.String("http.route", "/inbound"),
+        )
+
+        // Task 7: Rate limit check
+        if !rateLimiter.Allow(clientIP, rpsLimit) {
+            metrics.IncrementRateLimit()
+            metrics.IncrementError()
+            span.SetStatus(codes.Error, "rate limit exceeded")
+            sendErrorResponse(w, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "rate limit exceeded")
+            logger.Log(http.StatusTooManyRequests, nil)
+            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+            return
+        }
+
         envelopeFrom, recipients, err := parseEnvelope(r)
         if err != nil {
             metrics.IncrementError()
@@ -541,8 +654,15 @@ func main() {
             return
         }
 
+        // SMTP envelope sender may need to be a domain the relay server accepts,
+        // while the original From header is preserved inside the message body.
+        mailFrom := envelopeFrom
+        if smtpEnvelopeFrom != "" {
+            mailFrom = smtpEnvelopeFrom
+        }
+
         rawEmail := strings.TrimSpace(r.FormValue("email"))
-        messageData, err := buildMessage(r, rawEmail, envelopeFrom, recipients)
+        messageData, err := buildMessage(r, rawEmail, envelopeFrom, recipients, clientIP)
         if err != nil {
             metrics.IncrementError()
             span.RecordError(err)
@@ -555,7 +675,7 @@ func main() {
         }
 
         // Task 4: Use SMTP connection with timeout and proper cleanup (Task 5)
-        client, err := dialSMTPWithTimeout(smtpHost, smtpEhloHost, smtpTimeout)
+        client, err := dialSMTPWithTimeout(smtpHost, smtpEhloHost, clientIP, smtpUseProxyProtocol, smtpTimeout)
         if err != nil {
             metrics.IncrementError()
             span.RecordError(err)
@@ -568,7 +688,7 @@ func main() {
         }
         defer client.Close()
 
-        if err := client.Mail(envelopeFrom); err != nil {
+        if err := client.Mail(mailFrom); err != nil {
             metrics.IncrementError()
             span.RecordError(err)
             span.SetStatus(codes.Error, "SMTP operation failed")
@@ -775,11 +895,16 @@ func collectStrings(value interface{}) []string {
     return nil
 }
 
-func buildMessage(r *http.Request, rawEmail, envelopeFrom string, recipients []string) ([]byte, error) {
+func buildMessage(r *http.Request, rawEmail, envelopeFrom string, recipients []string, clientIP string) ([]byte, error) {
     if rawEmail != "" {
         // RFC 5321 requires CRLF line endings in the SMTP DATA phase.
         // Normalize the raw message so bare LF does not cause rejection.
-        return []byte(normalizeCRLF(rawEmail)), nil
+        // Also inject X-Originating-IP if the upstream proxy provided a client IP.
+        normalized := normalizeCRLF(rawEmail)
+        if clientIP != "" && !strings.Contains(normalized, "\nX-Originating-IP:") {
+            normalized = injectHeader(normalized, "X-Originating-IP", sanitizeHeader(clientIP))
+        }
+        return []byte(normalized), nil
     }
 
     headers, err := parseHeaders(r.FormValue("headers"))
@@ -823,6 +948,9 @@ func buildMessage(r *http.Request, rawEmail, envelopeFrom string, recipients []s
     }
     if headers.Get("Message-ID") == "" {
         headers.Set("Message-ID", fmt.Sprintf("<gateway.%d@localhost>", time.Now().UnixNano()))
+    }
+    if clientIP != "" && headers.Get("X-Originating-IP") == "" {
+        headers.Set("X-Originating-IP", sanitizeHeader(clientIP))
     }
     headers.Set("Content-Type", contentType)
 

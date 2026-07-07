@@ -35,6 +35,8 @@ A secure, production-ready HTTP-to-SMTP gateway for inbound webhook payloads (e.
 |----------|------|---------|-------------|
 | `SMTP_HOST` | string | **Required** | SMTP server hostname or IP (e.g., `mailhog:1025`, `smtp.example.com:587`). Must not be a private IP. |
 | `SMTP_EHLO_HOST` | string | container hostname | Hostname sent in the SMTP `EHLO`/`HELO` greeting. Many SMTP servers require a valid FQDN. Defaults to the container's hostname, falling back to `tunnelmail.local`. |
+| `SMTP_ENVELOPE_FROM` | string | unset | Optional fixed envelope sender address used in the SMTP `MAIL FROM` command. Use this when the upstream SMTP server rejects the original sender domain (e.g. inbound webhook `from` field). The original `From:` header inside the message body is preserved. |
+| `SMTP_USE_PROXY_PROTOCOL` | bool | `false` | When `true`, prepend a HAProxy PROXY Protocol v1 header on the SMTP connection so Stalwart sees the original client IP. Requires Stalwart's `proxyTrustedNetworks` to include TunnelMail's IP. |
 | `HTTP_PORT` | int | `8080` | HTTP server listen port. Also exposed in Docker (see Dockerfile comment). |
 | `SMTP_TIMEOUT` | int | `30` | SMTP operation timeout in seconds. Applies to connection establishment and command execution. |
 | `MAX_REQUEST_SIZE` | int | `104857600` | Maximum request body size in bytes (default 100MB). Includes multipart form data and attachments. |
