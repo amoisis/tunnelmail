@@ -34,6 +34,7 @@ A secure, production-ready HTTP-to-SMTP gateway for inbound webhook payloads (e.
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `SMTP_HOST` | string | **Required** | SMTP server hostname or IP (e.g., `mailhog:1025`, `smtp.example.com:587`). Must not be a private IP. |
+| `SMTP_EHLO_HOST` | string | container hostname | Hostname sent in the SMTP `EHLO`/`HELO` greeting. Many SMTP servers require a valid FQDN. Defaults to the container's hostname, falling back to `tunnelmail.local`. |
 | `HTTP_PORT` | int | `8080` | HTTP server listen port. Also exposed in Docker (see Dockerfile comment). |
 | `SMTP_TIMEOUT` | int | `30` | SMTP operation timeout in seconds. Applies to connection establishment and command execution. |
 | `MAX_REQUEST_SIZE` | int | `104857600` | Maximum request body size in bytes (default 100MB). Includes multipart form data and attachments. |

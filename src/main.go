@@ -107,13 +107,12 @@ func parseEnvInt64(key string, defaultVal int64) int64 {
 }
 
 // Task 4: SMTP Connection Timeout
-func dialSMTPWithTimeout(host string, timeout time.Duration) (*smtp.Client, error) {
+func dialSMTPWithTimeout(host, localName string, timeout time.Duration) (*smtp.Client, error) {
 	conn, err := net.DialTimeout("tcp", host, timeout)
 	if err != nil {
 		return nil, err
 	}
-	hostname := strings.Split(host, ":")[0]
-	client, err := smtp.NewClient(conn, hostname)
+	client, err := smtp.NewClient(conn, localName)
 	if err != nil {
 		conn.Close()
 		return nil, err
@@ -398,6 +397,14 @@ func main() {
 
     // Get configuration
     smtpTimeout := time.Duration(parseEnvInt("SMTP_TIMEOUT", 30)) * time.Second
+    smtpEhloHost := os.Getenv("SMTP_EHLO_HOST")
+    if smtpEhloHost == "" {
+        var err error
+        smtpEhloHost, err = os.Hostname()
+        if err != nil {
+            smtpEhloHost = "tunnelmail.local"
+        }
+    }
     maxRequestSize := parseEnvInt64("MAX_REQUEST_SIZE", 100<<20) // 100MB default
     rpsLimit := float64(parseEnvInt("RATE_LIMIT_RPS", 10))
     concurrentLimit := parseEnvInt("MAX_CONCURRENT_REQUESTS", 100)
@@ -526,7 +533,7 @@ func main() {
         }
 
         // Task 4: Use SMTP connection with timeout and proper cleanup (Task 5)
-        client, err := dialSMTPWithTimeout(smtpHost, smtpTimeout)
+        client, err := dialSMTPWithTimeout(smtpHost, smtpEhloHost, smtpTimeout)
         if err != nil {
             metrics.IncrementError()
             span.RecordError(err)

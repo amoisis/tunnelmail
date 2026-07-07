@@ -3,6 +3,7 @@ services:
     image: tunnelmail:latest
     environment:
       SMTP_HOST: smtp.example.com:587
+      SMTP_EHLO_HOST: tunnelmail.example.com
       HTTP_PORT: 8080
     ports:
       - "8080:8080"
