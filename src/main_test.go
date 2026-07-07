@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -254,6 +255,30 @@ recipient1@example.com,recipient2@example.com
 }
 
 // Test JSON payload with envelope.to as a single string (Cloudflare Worker format)
+func TestBuildMessageWrapsPlainTextRawBodyWithHeaders(t *testing.T) {
+	req := httptest.NewRequest("POST", "/inbound", nil)
+	msg, err := buildMessage(req, "Hello world", "sender@example.com", []string{"recipient@example.com"}, "203.0.113.1", JSONPayload{})
+	if err != nil {
+		t.Fatalf("buildMessage returned error: %v", err)
+	}
+	text := string(msg)
+	if !strings.Contains(text, "From: sender@example.com") {
+		t.Fatalf("expected From header in message, got %q", text)
+	}
+	if !strings.Contains(text, "To: recipient@example.com") {
+		t.Fatalf("expected To header in message, got %q", text)
+	}
+	if !strings.Contains(text, "Date:") {
+		t.Fatalf("expected Date header in message, got %q", text)
+	}
+	if !strings.Contains(text, "Message-ID:") {
+		t.Fatalf("expected Message-ID header in message, got %q", text)
+	}
+	if !strings.Contains(text, "\r\n\r\nHello world") {
+		t.Fatalf("expected header/body separator before raw body, got %q", text)
+	}
+}
+
 func TestParseEnvelopeJSONStringTo(t *testing.T) {
 	jsonBody := `{
 		"envelope": {
@@ -279,6 +304,19 @@ func TestParseEnvelopeJSONStringTo(t *testing.T) {
 	}
 	if len(recipients) != 1 || recipients[0] != "recipient@example.com" {
 		t.Errorf("recipients = %v, want [recipient@example.com]", recipients)
+	}
+}
+
+func TestDescribeSMTPHandshakeErrorIncludesProxyHint(t *testing.T) {
+	err := &net.DNSError{Err: "i/o timeout", Name: "10.0.10.3", Server: "10.0.10.3:25"}
+	wrapped := describeSMTPHandshakeError("10.0.10.3:25", false, err)
+	msg := wrapped.Error()
+
+	if !strings.Contains(msg, "SMTP_USE_PROXY_PROTOCOL") {
+		t.Fatalf("expected timeout message to mention SMTP_USE_PROXY_PROTOCOL, got %q", msg)
+	}
+	if !strings.Contains(msg, "PROXY Protocol") {
+		t.Fatalf("expected timeout message to mention PROXY Protocol, got %q", msg)
 	}
 }
 

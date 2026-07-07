@@ -65,7 +65,7 @@ func injectHeader(message, name, value string) string {
 	if idx == -1 {
 		return message + "\r\n" + name + ": " + value + "\r\n"
 	}
-	return message[:idx+2] + name + ": " + value + message[idx+2:]
+	return message[:idx] + name + ": " + value + "\r\n" + message[idx:]
 }
 
 // injectAuthResults adds X-AuthResults-* and X-Spam-Score headers from the
@@ -101,6 +101,23 @@ func ensureRequiredHeaders(message, from string) string {
 		message = injectHeader(message, "Message-ID", fmt.Sprintf("<gateway.%d@%s>", time.Now().UnixNano(), domain))
 	}
 	return message
+}
+
+func looksLikeRFC5322Message(message string) bool {
+	normalized := normalizeCRLF(message)
+	if strings.Contains(normalized, "\r\n\r\n") {
+		return true
+	}
+	for _, line := range strings.Split(normalized, "\r\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			return true
+		}
+		if strings.Contains(trimmed, ":") {
+			return true
+		}
+	}
+	return false
 }
 
 // Task 2: Email Validation
@@ -253,10 +270,23 @@ type smtpSession struct {
 	timeout time.Duration
 }
 
+func describeSMTPHandshakeError(host string, useProxyProtocol bool, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	msg := fmt.Sprintf("could not connect to SMTP host %s: %v", host, err)
+	lowerErr := strings.ToLower(err.Error())
+	if !useProxyProtocol && (strings.Contains(lowerErr, "timeout") || strings.Contains(lowerErr, "i/o timeout") || errors.Is(err, os.ErrDeadlineExceeded)) {
+		return fmt.Errorf("%s; the server may be expecting a PROXY Protocol v1 handshake. If this is Stalwart or another proxy-aware SMTP server, set SMTP_USE_PROXY_PROTOCOL=true and ensure the server trusts this gateway", msg)
+	}
+	return fmt.Errorf("%s", msg)
+}
+
 func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, timeout time.Duration) (*smtpSession, error) {
 	conn, err := net.DialTimeout("tcp", host, timeout)
 	if err != nil {
-		return nil, err
+		return nil, describeSMTPHandshakeError(host, useProxyProtocol, err)
 	}
 
 	if useProxyProtocol && clientIP != "" {
@@ -286,7 +316,7 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 	// Read the server banner.
 	if _, _, err := s.text.ReadResponse(220); err != nil {
 		s.Close()
-		return nil, err
+		return nil, describeSMTPHandshakeError(host, useProxyProtocol, err)
 	}
 
 	// Send EHLO/HELO.
@@ -299,55 +329,71 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 }
 
 func (s *smtpSession) hello(localName string) error {
+	log.Printf("SMTP -> EHLO %s", localName)
 	if err := s.text.PrintfLine("EHLO %s", localName); err != nil {
 		return err
 	}
-	if _, _, err := s.text.ReadResponse(250); err != nil {
+	code, msg, err := s.text.ReadResponse(250)
+	log.Printf("SMTP <- %d %s", code, msg)
+	if err != nil {
 		// Fall back to HELO if EHLO is not supported.
+		log.Printf("SMTP -> HELO %s", localName)
 		if err := s.text.PrintfLine("HELO %s", localName); err != nil {
 			return err
 		}
-		_, _, err = s.text.ReadResponse(250)
+		code, msg, err = s.text.ReadResponse(250)
+		log.Printf("SMTP <- %d %s", code, msg)
 		return err
 	}
 	return nil
 }
 
 func (s *smtpSession) Mail(from string) error {
+	log.Printf("SMTP -> MAIL FROM:<%s>", from)
 	if err := s.text.PrintfLine("MAIL FROM:<%s>", from); err != nil {
 		return err
 	}
-	_, _, err := s.text.ReadResponse(250)
+	code, msg, err := s.text.ReadResponse(250)
+	log.Printf("SMTP <- %d %s", code, msg)
 	return err
 }
 
 func (s *smtpSession) Rcpt(to string) error {
+	log.Printf("SMTP -> RCPT TO:<%s>", to)
 	if err := s.text.PrintfLine("RCPT TO:<%s>", to); err != nil {
 		return err
 	}
-	_, _, err := s.text.ReadResponse(25) // 250 or 251
+	code, msg, err := s.text.ReadResponse(25) // 250 or 251
+	log.Printf("SMTP <- %d %s", code, msg)
 	return err
 }
 
 func (s *smtpSession) Data() (io.WriteCloser, error) {
+	log.Printf("SMTP -> DATA")
 	if err := s.text.PrintfLine("DATA"); err != nil {
 		return nil, err
 	}
-	if _, _, err := s.text.ReadResponse(354); err != nil {
+	code, msg, err := s.text.ReadResponse(354)
+	log.Printf("SMTP <- %d %s", code, msg)
+	if err != nil {
 		return nil, err
 	}
 	return s.text.DotWriter(), nil
 }
 
 func (s *smtpSession) readFinalDataResponse() (int, string, error) {
-	return s.text.ReadResponse(250)
+	code, msg, err := s.text.ReadResponse(250)
+	log.Printf("SMTP <- %d %s", code, msg)
+	return code, msg, err
 }
 
 func (s *smtpSession) Quit() error {
+	log.Printf("SMTP -> QUIT")
 	if err := s.text.PrintfLine("QUIT"); err != nil {
 		return err
 	}
-	_, _, err := s.text.ReadResponse(221)
+	code, msg, err := s.text.ReadResponse(221)
+	log.Printf("SMTP <- %d %s", code, msg)
 	return err
 }
 
@@ -950,7 +996,7 @@ func main() {
             span.RecordError(err)
             span.SetStatus(codes.Error, "SMTP connection failed")
             log.Printf("smtp dial error: %v", err)
-            sendErrorResponse(w, http.StatusBadGateway, "SMTP_CONNECT_FAILED", "SMTP connection failed")
+            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_CONNECT_FAILED", "SMTP connection failed", err.Error())
             logger.Log(http.StatusBadGateway, err)
             metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
             return
@@ -997,6 +1043,8 @@ func main() {
         if len(messageData) > 0 && !bytes.HasSuffix(messageData, []byte("\r\n")) {
             messageData = append(messageData, '\r', '\n')
         }
+
+        log.Printf("SMTP DATA (%d bytes):\n%s", len(messageData), string(messageData))
 
         _, err = wc.Write(messageData)
         if err != nil {
@@ -1210,6 +1258,20 @@ func buildMessage(r *http.Request, rawEmail, envelopeFrom string, recipients []s
         // Normalize the raw message so bare LF does not cause rejection.
         // Also inject X-Originating-IP if the upstream proxy provided a client IP.
         normalized := normalizeCRLF(rawEmail)
+        if !looksLikeRFC5322Message(normalized) {
+            subject := sanitizeHeader(strings.TrimSpace(r.FormValue("subject")))
+            if subject == "" {
+                subject = sanitizeHeader(payload.Headers.Subject)
+            }
+            headerLines := []string{
+                fmt.Sprintf("From: %s", sanitizeHeader(envelopeFrom)),
+                fmt.Sprintf("To: %s", sanitizeHeader(strings.Join(recipients, ", "))),
+            }
+            if subject != "" {
+                headerLines = append(headerLines, fmt.Sprintf("Subject: %s", subject))
+            }
+            normalized = strings.Join(headerLines, "\r\n") + "\r\n\r\n" + normalized
+        }
         if clientIP != "" && !strings.Contains(normalized, "\nX-Originating-IP:") {
             normalized = injectHeader(normalized, "X-Originating-IP", sanitizeHeader(clientIP))
         }
