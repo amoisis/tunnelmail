@@ -32,6 +32,29 @@ func TestSanitizeHeader(t *testing.T) {
 	}
 }
 
+// Test CRLF normalization for raw email messages
+func TestNormalizeCRLF(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"line1\nline2", "line1\r\nline2"},
+		{"line1\r\nline2", "line1\r\nline2"},
+		{"line1\rline2", "line1\r\nline2"},
+		{"line1\nline2\rline3", "line1\r\nline2\r\nline3"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("normalize_%q", tt.input), func(t *testing.T) {
+			result := normalizeCRLF(tt.input)
+			if result != tt.expected {
+				t.Errorf("normalizeCRLF(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
 // Test Email Validation
 func TestIsValidEmail(t *testing.T) {
 	tests := []struct {

@@ -50,6 +50,14 @@ func sanitizeHeader(s string) string {
 	return s
 }
 
+// normalizeCRLF converts line endings to CRLF, which is required by RFC 5321
+// for the SMTP DATA phase. It handles LF-only and mixed CRLF/LF input.
+func normalizeCRLF(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.ReplaceAll(s, "\n", "\r\n")
+}
+
 // Task 2: Email Validation
 func isValidEmail(email string) bool {
 	email = strings.TrimSpace(email)
@@ -204,14 +212,22 @@ func (rl *RequestLogger) Log(statusCode int, err error) {
 
 // Task 12: Error Response Structure
 type ErrorResponse struct {
-	Error string `json:"error"`
-	Code  string `json:"code,omitempty"`
+	Error   string `json:"error"`
+	Code    string `json:"code,omitempty"`
+	Details string `json:"details,omitempty"`
 }
 
 func sendErrorResponse(w http.ResponseWriter, statusCode int, errorCode, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	resp := ErrorResponse{Error: message, Code: errorCode}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func sendErrorResponseWithDetails(w http.ResponseWriter, statusCode int, errorCode, message, details string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	resp := ErrorResponse{Error: message, Code: errorCode, Details: details}
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -551,7 +567,7 @@ func main() {
             span.RecordError(err)
             span.SetStatus(codes.Error, "SMTP operation failed")
             log.Printf("smtp mail error: %v", err)
-            sendErrorResponse(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP operation failed")
+            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP MAIL FROM failed", err.Error())
             logger.Log(http.StatusBadGateway, err)
             metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
             return
@@ -563,7 +579,7 @@ func main() {
                 span.RecordError(err)
                 span.SetStatus(codes.Error, "SMTP operation failed")
             	log.Printf("smtp rcpt error: %v", err)
-            	sendErrorResponse(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP operation failed")
+            	sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", fmt.Sprintf("SMTP RCPT TO <%s> failed", recipient), err.Error())
             	logger.Log(http.StatusBadGateway, err)
             	metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
             	return
@@ -576,7 +592,7 @@ func main() {
             span.RecordError(err)
             span.SetStatus(codes.Error, "SMTP operation failed")
             log.Printf("smtp data error: %v", err)
-            sendErrorResponse(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP operation failed")
+            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP DATA command failed", err.Error())
             logger.Log(http.StatusBadGateway, err)
             metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
             return
@@ -589,7 +605,7 @@ func main() {
             span.RecordError(err)
             span.SetStatus(codes.Error, "SMTP operation failed")
             log.Printf("smtp write error: %v", err)
-            sendErrorResponse(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP operation failed")
+            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP DATA write failed", err.Error())
             logger.Log(http.StatusBadGateway, err)
             metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
             return
@@ -755,7 +771,9 @@ func collectStrings(value interface{}) []string {
 
 func buildMessage(r *http.Request, rawEmail, envelopeFrom string, recipients []string) ([]byte, error) {
     if rawEmail != "" {
-        return []byte(rawEmail), nil
+        // RFC 5321 requires CRLF line endings in the SMTP DATA phase.
+        // Normalize the raw message so bare LF does not cause rejection.
+        return []byte(normalizeCRLF(rawEmail)), nil
     }
 
     headers, err := parseHeaders(r.FormValue("headers"))
