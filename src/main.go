@@ -120,9 +120,15 @@ func dialSMTPWithTimeout(host, localName string, timeout time.Duration) (*smtp.C
 	if err != nil {
 		return nil, err
 	}
-	client, err := smtp.NewClient(conn, localName)
+	client, err := smtp.NewClient(conn, host)
 	if err != nil {
 		conn.Close()
+		return nil, err
+	}
+	// net/smtp.NewClient uses its second argument as serverName (for TLS),
+	// but the EHLO hostname defaults to "localhost" unless we call Hello.
+	if err := client.Hello(localName); err != nil {
+		client.Close()
 		return nil, err
 	}
 	return client, nil
