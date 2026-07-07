@@ -53,9 +53,22 @@ A secure, production-ready HTTP-to-SMTP gateway for inbound webhook payloads (e.
 
 Receives webhook payload and forwards to SMTP server.
 
-**Request Format**: `multipart/form-data`
+**Request Formats**:
 
-**Expected Fields**:
+1. `application/json` (recommended for Cloudflare Workers):
+```json
+{
+  "raw": "...full MIME message...",
+  "envelope": { "from": "sender@example.com", "to": ["recipient@example.com"] },
+  "headers": { "message_id": "...", "date": "...", "subject": "...", "from": "...", "to": "..." },
+  "client_ip": "203.0.113.45",
+  "ehlo": "mail.example.com",
+  "auth_results": { "spf": "pass", "dkim": "pass" },
+  "spam_score": "1.5"
+}
+```
+
+2. `multipart/form-data` (SendGrid-style inbound parse):
 - `from` (required): Sender email address (validated)
 - `to` (required): Recipient email address(es), comma-separated (validated)
 - `email` (optional): Raw RFC 2822 email message (takes precedence)
@@ -63,6 +76,7 @@ Receives webhook payload and forwards to SMTP server.
 - `html` (optional): HTML body
 - `headers` (optional): Additional email headers (CRLF-sanitized)
 - `attachment*` (optional): File attachments
+- `client_ip` / `sender_ip` (optional): Original client IP forwarded by proxy
 
 **Success Response** (200 OK):
 ```json

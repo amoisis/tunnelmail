@@ -68,6 +68,21 @@ func injectHeader(message, name, value string) string {
 	return message[:idx+2] + name + ": " + value + message[idx+2:]
 }
 
+// injectAuthResults adds X-AuthResults-* and X-Spam-Score headers from the
+// upstream worker into a raw email message when they are not already present.
+func injectAuthResults(message string, payload JSONPayload) string {
+	if payload.AuthResults.SPF != "" && !strings.Contains(message, "\nX-AuthResults-SPF:") {
+		message = injectHeader(message, "X-AuthResults-SPF", sanitizeHeader(payload.AuthResults.SPF))
+	}
+	if payload.AuthResults.DKIM != "" && !strings.Contains(message, "\nX-AuthResults-DKIM:") {
+		message = injectHeader(message, "X-AuthResults-DKIM", sanitizeHeader(payload.AuthResults.DKIM))
+	}
+	if payload.SpamScore != "" && !strings.Contains(message, "\nX-Spam-Score:") {
+		message = injectHeader(message, "X-Spam-Score", sanitizeHeader(payload.SpamScore))
+	}
+	return message
+}
+
 // ensureRequiredHeaders adds Date and Message-ID headers if they are missing
 // from a raw email message. Spam filters heavily penalize messages without
 // these headers.
@@ -429,6 +444,35 @@ type ErrorResponse struct {
 	Details string `json:"details,omitempty"`
 }
 
+// JSONPayload is the request format sent by the Cloudflare email worker.
+type JSONPayload struct {
+	Raw         string            `json:"raw"`
+	Envelope    Envelope          `json:"envelope"`
+	Headers     MessageHeaders    `json:"headers"`
+	ClientIP    string            `json:"client_ip"`
+	EHLO        string            `json:"ehlo"`
+	AuthResults AuthResults       `json:"auth_results"`
+	SpamScore   string            `json:"spam_score"`
+}
+
+type Envelope struct {
+	From string   `json:"from"`
+	To   []string `json:"to"`
+}
+
+type MessageHeaders struct {
+	MessageID string `json:"message_id"`
+	Date      string `json:"date"`
+	Subject   string `json:"subject"`
+	From      string `json:"from"`
+	To        string `json:"to"`
+}
+
+type AuthResults struct {
+	SPF  string `json:"spf"`
+	DKIM string `json:"dkim"`
+}
+
 func sendErrorResponse(w http.ResponseWriter, statusCode int, errorCode, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -467,11 +511,12 @@ func isUsableClientIP(ipStr string) bool {
 }
 
 // extractClientIP returns the original client IP provided by an upstream proxy.
-// It prefers explicit FormData fields (client_ip, sender_ip) sent by the proxy,
-// then Cloudflare-specific headers, then X-Forwarded-For, and finally the
-// connection's remote address. Invalid/local-only IPs are skipped.
-func extractClientIP(r *http.Request) string {
+// It prefers explicit FormData fields (client_ip, sender_ip) or the JSON
+// payload's client_ip, then Cloudflare-specific headers, then X-Forwarded-For,
+// and finally the connection's remote address. Invalid/local-only IPs are skipped.
+func extractClientIP(r *http.Request, payload JSONPayload) string {
 	candidates := []string{
+		payload.ClientIP,
 		r.FormValue("client_ip"),
 		r.FormValue("sender_ip"),
 		r.Header.Get("CF-Connecting-IP"),
@@ -775,18 +820,34 @@ func main() {
             return
         }
 
-        if err := r.ParseMultipartForm(maxRequestSize); err != nil {
-            metrics.IncrementError()
-            span.RecordError(err)
-            span.SetStatus(codes.Error, "invalid multipart form")
-            sendErrorResponse(w, http.StatusBadRequest, "INVALID_MULTIPART", "invalid multipart form")
-            logger.Log(http.StatusBadRequest, err)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
+        var payload JSONPayload
+        var isJSON bool
+        contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+        if contentType == "application/json" {
+            isJSON = true
+            if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestSize)).Decode(&payload); err != nil {
+                metrics.IncrementError()
+                span.RecordError(err)
+                span.SetStatus(codes.Error, "invalid json payload")
+                sendErrorResponse(w, http.StatusBadRequest, "INVALID_JSON", "invalid JSON payload")
+                logger.Log(http.StatusBadRequest, err)
+                metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+                return
+            }
+        } else {
+            if err := r.ParseMultipartForm(maxRequestSize); err != nil {
+                metrics.IncrementError()
+                span.RecordError(err)
+                span.SetStatus(codes.Error, "invalid multipart form")
+                sendErrorResponse(w, http.StatusBadRequest, "INVALID_MULTIPART", "invalid multipart form")
+                logger.Log(http.StatusBadRequest, err)
+                metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+                return
+            }
         }
 
-        // Extract the real client IP from FormData/headers now that the form is parsed.
-        clientIP := extractClientIP(r)
+        // Extract the real client IP from FormData/headers/JSON payload.
+        clientIP := extractClientIP(r, payload)
         logger.remoteIP = clientIP
         span.SetAttributes(
             attribute.String("client.ip", clientIP),
@@ -794,10 +855,14 @@ func main() {
             attribute.String("http.route", "/inbound"),
         )
 
-        // Determine the EHLO hostname. When enabled, prefer the reverse DNS of
-        // the original client IP to avoid HELO/PTR mismatches in spam filters.
+        // Determine the EHLO hostname. The upstream worker may provide one;
+        // otherwise, when enabled, prefer the reverse DNS of the original
+        // client IP to avoid HELO/PTR mismatches in spam filters.
         ehloHost := smtpEhloHost
-        if smtpEhloUseReverseDNS && clientIP != "" {
+        if payload.EHLO != "" {
+            ehloHost = sanitizeHeader(payload.EHLO)
+            log.Printf("using EHLO hostname from upstream: %s", ehloHost)
+        } else if smtpEhloUseReverseDNS && clientIP != "" {
             if ptr := reverseDNS(clientIP, reverseDNSTimeout); ptr != "" {
                 log.Printf("using reverse DNS EHLO hostname for %s: %s", clientIP, ptr)
                 ehloHost = ptr
@@ -817,7 +882,7 @@ func main() {
             return
         }
 
-        envelopeFrom, recipients, err := parseEnvelope(r)
+        envelopeFrom, recipients, err := parseEnvelope(r, payload)
         if err != nil {
             metrics.IncrementError()
             span.RecordError(err)
@@ -836,7 +901,10 @@ func main() {
         }
 
         rawEmail := strings.TrimSpace(r.FormValue("email"))
-        messageData, err := buildMessage(r, rawEmail, envelopeFrom, recipients, clientIP)
+        if isJSON {
+            rawEmail = strings.TrimSpace(payload.Raw)
+        }
+        messageData, err := buildMessage(r, rawEmail, envelopeFrom, recipients, clientIP, payload)
         if err != nil {
             metrics.IncrementError()
             span.RecordError(err)
@@ -998,8 +1066,11 @@ func main() {
     log.Println("server stopped")
 }
 
-func parseEnvelope(r *http.Request) (string, []string, error) {
-    from := strings.TrimSpace(r.FormValue("envelope.from"))
+func parseEnvelope(r *http.Request, payload JSONPayload) (string, []string, error) {
+    from := strings.TrimSpace(payload.Envelope.From)
+    if from == "" {
+        from = strings.TrimSpace(r.FormValue("envelope.from"))
+    }
     if from == "" {
         from = strings.TrimSpace(r.FormValue("from"))
     }
@@ -1024,6 +1095,9 @@ func parseEnvelope(r *http.Request) (string, []string, error) {
     }
 
     var recipients []string
+    if len(payload.Envelope.To) > 0 {
+        recipients = payload.Envelope.To
+    }
     if raw := strings.TrimSpace(r.FormValue("envelope.to")); raw != "" {
         recipients = parseRecipients(raw)
     }
@@ -1103,7 +1177,7 @@ func collectStrings(value interface{}) []string {
     return nil
 }
 
-func buildMessage(r *http.Request, rawEmail, envelopeFrom string, recipients []string, clientIP string) ([]byte, error) {
+func buildMessage(r *http.Request, rawEmail, envelopeFrom string, recipients []string, clientIP string, payload JSONPayload) ([]byte, error) {
     if rawEmail != "" {
         // RFC 5321 requires CRLF line endings in the SMTP DATA phase.
         // Normalize the raw message so bare LF does not cause rejection.
@@ -1112,6 +1186,7 @@ func buildMessage(r *http.Request, rawEmail, envelopeFrom string, recipients []s
         if clientIP != "" && !strings.Contains(normalized, "\nX-Originating-IP:") {
             normalized = injectHeader(normalized, "X-Originating-IP", sanitizeHeader(clientIP))
         }
+        normalized = injectAuthResults(normalized, payload)
         normalized = ensureRequiredHeaders(normalized, envelopeFrom)
         return []byte(normalized), nil
     }
@@ -1160,6 +1235,15 @@ func buildMessage(r *http.Request, rawEmail, envelopeFrom string, recipients []s
     }
     if clientIP != "" && headers.Get("X-Originating-IP") == "" {
         headers.Set("X-Originating-IP", sanitizeHeader(clientIP))
+    }
+    if payload.AuthResults.SPF != "" && headers.Get("X-AuthResults-SPF") == "" {
+        headers.Set("X-AuthResults-SPF", sanitizeHeader(payload.AuthResults.SPF))
+    }
+    if payload.AuthResults.DKIM != "" && headers.Get("X-AuthResults-DKIM") == "" {
+        headers.Set("X-AuthResults-DKIM", sanitizeHeader(payload.AuthResults.DKIM))
+    }
+    if payload.SpamScore != "" && headers.Get("X-Spam-Score") == "" {
+        headers.Set("X-Spam-Score", sanitizeHeader(payload.SpamScore))
     }
     headers.Set("Content-Type", contentType)
 

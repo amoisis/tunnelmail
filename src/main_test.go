@@ -238,7 +238,7 @@ recipient1@example.com,recipient2@example.com
 		t.Skipf("setup error: %v", err)
 	}
 
-	from, recipients, err := parseEnvelope(req)
+	from, recipients, err := parseEnvelope(req, JSONPayload{})
 	if err != nil {
 		t.Errorf("parseEnvelope should not error for valid input: %v", err)
 	}
