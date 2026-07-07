@@ -456,8 +456,35 @@ type JSONPayload struct {
 }
 
 type Envelope struct {
-	From string   `json:"from"`
-	To   []string `json:"to"`
+	From string `json:"from"`
+	To   StringOrStringSlice `json:"to"`
+}
+
+// StringOrStringSlice accepts a JSON value that may be either a single string
+// or an array of strings. This is needed because upstream workers may send
+// envelope.to as either "a@b.c" or ["a@b.c"].
+type StringOrStringSlice []string
+
+func (s *StringOrStringSlice) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	if data[0] == '[' {
+		var arr []string
+		if err := json.Unmarshal(data, &arr); err != nil {
+			return err
+		}
+		*s = arr
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil {
+		return err
+	}
+	if str != "" {
+		*s = []string{str}
+	}
+	return nil
 }
 
 type MessageHeaders struct {

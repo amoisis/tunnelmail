@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -249,6 +250,35 @@ recipient1@example.com,recipient2@example.com
 
 	if len(recipients) != 2 {
 		t.Errorf("recipients count = %d, want 2", len(recipients))
+	}
+}
+
+// Test JSON payload with envelope.to as a single string (Cloudflare Worker format)
+func TestParseEnvelopeJSONStringTo(t *testing.T) {
+	jsonBody := `{
+		"envelope": {
+			"from": "sender@example.com",
+			"to": "recipient@example.com"
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/inbound", strings.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	var payload JSONPayload
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		t.Fatalf("failed to decode JSON payload: %v", err)
+	}
+
+	from, recipients, err := parseEnvelope(req, payload)
+	if err != nil {
+		t.Errorf("parseEnvelope should not error for JSON payload: %v", err)
+	}
+	if from != "sender@example.com" {
+		t.Errorf("from = %q, want %q", from, "sender@example.com")
+	}
+	if len(recipients) != 1 || recipients[0] != "recipient@example.com" {
+		t.Errorf("recipients = %v, want [recipient@example.com]", recipients)
 	}
 }
 
