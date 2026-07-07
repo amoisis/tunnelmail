@@ -68,6 +68,26 @@ func injectHeader(message, name, value string) string {
 	return message[:idx+2] + name + ": " + value + message[idx+2:]
 }
 
+// ensureRequiredHeaders adds Date and Message-ID headers if they are missing
+// from a raw email message. Spam filters heavily penalize messages without
+// these headers.
+func ensureRequiredHeaders(message, from string) string {
+	if !strings.Contains(message, "\nDate:") && !strings.HasPrefix(message, "Date:") {
+		message = injectHeader(message, "Date", time.Now().UTC().Format(time.RFC1123Z))
+	}
+	if !strings.Contains(message, "\nMessage-ID:") && !strings.HasPrefix(message, "Message-ID:") {
+		domain := "localhost"
+		if from != "" {
+			parts := strings.Split(from, "@")
+			if len(parts) == 2 && parts[1] != "" {
+				domain = parts[1]
+			}
+		}
+		message = injectHeader(message, "Message-ID", fmt.Sprintf("<gateway.%d@%s>", time.Now().UnixNano(), domain))
+	}
+	return message
+}
+
 // Task 2: Email Validation
 func isValidEmail(email string) bool {
 	email = strings.TrimSpace(email)
@@ -122,6 +142,35 @@ func parseEnvInt64(key string, defaultVal int64) int64 {
 		return defaultVal
 	}
 	return parsed
+}
+
+// reverseDNS looks up the PTR record for an IP with a short timeout.
+// It returns the first resolved hostname or an empty string on failure.
+func reverseDNS(ipStr string, timeout time.Duration) string {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var names []string
+	var err error
+	done := make(chan struct{})
+	go func() {
+		names, err = net.LookupAddr(ipStr)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if err != nil || len(names) == 0 {
+			return ""
+		}
+		name := strings.TrimSuffix(names[0], ".")
+		if name == "" {
+			return ""
+		}
+		return name
+	case <-ctx.Done():
+		return ""
+	}
 }
 
 // buildProxyHeader constructs a HAProxy PROXY Protocol v1 header so the
@@ -647,7 +696,9 @@ func main() {
         log.Fatalf("SMTP_ENVELOPE_FROM is not a valid email address: %s", smtpEnvelopeFrom)
     }
     smtpUseProxyProtocol := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_USE_PROXY_PROTOCOL")), "true")
-    log.Printf("config: SMTP_HOST=%s SMTP_EHLO_HOST=%s SMTP_USE_PROXY_PROTOCOL=%v", smtpHost, smtpEhloHost, smtpUseProxyProtocol)
+    smtpEhloUseReverseDNS := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_EHLO_USE_CLIENT_REVERSE_DNS")), "true")
+    reverseDNSTimeout := time.Duration(parseEnvInt("SMTP_REVERSE_DNS_TIMEOUT_MS", 500)) * time.Millisecond
+    log.Printf("config: SMTP_HOST=%s SMTP_EHLO_HOST=%s SMTP_USE_PROXY_PROTOCOL=%v SMTP_EHLO_USE_CLIENT_REVERSE_DNS=%v", smtpHost, smtpEhloHost, smtpUseProxyProtocol, smtpEhloUseReverseDNS)
     maxRequestSize := parseEnvInt64("MAX_REQUEST_SIZE", 100<<20) // 100MB default
     rpsLimit := float64(parseEnvInt("RATE_LIMIT_RPS", 10))
     concurrentLimit := parseEnvInt("MAX_CONCURRENT_REQUESTS", 100)
@@ -743,6 +794,18 @@ func main() {
             attribute.String("http.route", "/inbound"),
         )
 
+        // Determine the EHLO hostname. When enabled, prefer the reverse DNS of
+        // the original client IP to avoid HELO/PTR mismatches in spam filters.
+        ehloHost := smtpEhloHost
+        if smtpEhloUseReverseDNS && clientIP != "" {
+            if ptr := reverseDNS(clientIP, reverseDNSTimeout); ptr != "" {
+                log.Printf("using reverse DNS EHLO hostname for %s: %s", clientIP, ptr)
+                ehloHost = ptr
+            } else {
+                log.Printf("reverse DNS lookup failed for %s, using EHLO hostname %s", clientIP, smtpEhloHost)
+            }
+        }
+
         // Task 7: Rate limit check
         if !rateLimiter.Allow(clientIP, rpsLimit) {
             metrics.IncrementRateLimit()
@@ -786,7 +849,7 @@ func main() {
         }
 
         // Task 4: Use SMTP connection with timeout and proper cleanup (Task 5)
-        client, err := newSMTPSession(smtpHost, smtpEhloHost, clientIP, smtpUseProxyProtocol, smtpTimeout)
+        client, err := newSMTPSession(smtpHost, ehloHost, clientIP, smtpUseProxyProtocol, smtpTimeout)
         if err != nil {
             metrics.IncrementError()
             span.RecordError(err)
@@ -1049,6 +1112,7 @@ func buildMessage(r *http.Request, rawEmail, envelopeFrom string, recipients []s
         if clientIP != "" && !strings.Contains(normalized, "\nX-Originating-IP:") {
             normalized = injectHeader(normalized, "X-Originating-IP", sanitizeHeader(clientIP))
         }
+        normalized = ensureRequiredHeaders(normalized, envelopeFrom)
         return []byte(normalized), nil
     }
 

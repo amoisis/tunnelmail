@@ -35,6 +35,8 @@ A secure, production-ready HTTP-to-SMTP gateway for inbound webhook payloads (e.
 |----------|------|---------|-------------|
 | `SMTP_HOST` | string | **Required** | SMTP server hostname or IP (e.g., `mailhog:1025`, `smtp.example.com:587`). Must not be a private IP. |
 | `SMTP_EHLO_HOST` | string | container hostname | Hostname sent in the SMTP `EHLO`/`HELO` greeting. Many SMTP servers require a valid FQDN. Defaults to the container's hostname, falling back to `tunnelmail.local`. |
+| `SMTP_EHLO_USE_CLIENT_REVERSE_DNS` | bool | `false` | When `true`, perform a reverse DNS (PTR) lookup on the original client IP and use the result as the `EHLO` hostname. This avoids `HELO_IPREV_MISMATCH` spam penalties when the client's PTR record differs from `SMTP_EHLO_HOST`. |
+| `SMTP_REVERSE_DNS_TIMEOUT_MS` | int | `500` | Timeout in milliseconds for the reverse DNS lookup when `SMTP_EHLO_USE_CLIENT_REVERSE_DNS` is enabled. |
 | `SMTP_ENVELOPE_FROM` | string | unset | Optional fixed envelope sender address used in the SMTP `MAIL FROM` command. Use this when the upstream SMTP server rejects the original sender domain (e.g. inbound webhook `from` field). The original `From:` header inside the message body is preserved. |
 | `SMTP_USE_PROXY_PROTOCOL` | bool | `false` | When `true`, prepend a HAProxy PROXY Protocol v1 header on the SMTP connection so Stalwart sees the original client IP. Requires Stalwart's `proxyTrustedNetworks` to include TunnelMail's IP. |
 | `HTTP_PORT` | int | `8080` | HTTP server listen port. Also exposed in Docker (see Dockerfile comment). |
