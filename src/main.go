@@ -245,7 +245,11 @@ func buildProxyHeader(srcIP, dstHost string) (string, error) {
 	} else {
 		family = "TCP6"
 		if dst != nil {
-			dstStr = dst.String()
+			if dst.To4() != nil {
+				dstStr = fmt.Sprintf("::ffff:%s", dst.String())
+			} else {
+				dstStr = dst.String()
+			}
 		} else {
 			dstStr = "::"
 		}

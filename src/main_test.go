@@ -320,6 +320,16 @@ func TestDescribeSMTPHandshakeErrorIncludesProxyHint(t *testing.T) {
 	}
 }
 
+func TestBuildProxyHeaderUsesIPv4MappedIPv6ForMixedFamilies(t *testing.T) {
+	header, err := buildProxyHeader("2a01:111:f403:c40d::4", "10.0.10.16:25")
+	if err != nil {
+		t.Fatalf("buildProxyHeader returned error: %v", err)
+	}
+	if header != "PROXY TCP6 2a01:111:f403:c40d::4 ::ffff:10.0.10.16 0 25\r\n" {
+		t.Fatalf("unexpected proxy header: %q", header)
+	}
+}
+
 // Test Client IP Detection
 func TestGetClientIP(t *testing.T) {
 	tests := []struct {
