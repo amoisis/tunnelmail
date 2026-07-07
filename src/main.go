@@ -723,10 +723,10 @@ func main() {
             metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
             return
         }
-        defer wc.Close()
 
         _, err = wc.Write(messageData)
         if err != nil {
+            wc.Close()
             metrics.IncrementError()
             span.RecordError(err)
             span.SetStatus(codes.Error, "SMTP operation failed")
@@ -737,11 +737,23 @@ func main() {
             return
         }
 
-        if err := client.Quit(); err != nil {
+        // Close the DATA writer to send the terminating "." and read the
+        // server's acceptance response. This MUST happen before QUIT.
+        if err := wc.Close(); err != nil {
             metrics.IncrementError()
             span.RecordError(err)
-            span.SetStatus(codes.Error, "SMTP operation failed")
-            log.Printf("smtp quit error: %v", err)
+            span.SetStatus(codes.Error, "SMTP DATA acceptance failed")
+            log.Printf("smtp data close error: %v", err)
+            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP server rejected message data", err.Error())
+            logger.Log(http.StatusBadGateway, err)
+            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+            return
+        }
+
+        if err := client.Quit(); err != nil {
+            // QUIT failures after successful DATA acceptance are not fatal;
+            // the message has already been queued by the server.
+            log.Printf("smtp quit warning: %v", err)
         }
 
         span.SetStatus(codes.Ok, "accepted")
