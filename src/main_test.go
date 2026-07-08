@@ -70,7 +70,7 @@ func TestIsValidEmail(t *testing.T) {
 		{"noemail", false},
 		{"@example.com", false},
 		{"user@", false},
-		{"user @example.com", true}, // trimmed
+		{"user @example.com", true},  // trimmed
 		{"user@domain", false},       // no dot in domain
 		{"user@@example.com", false}, // multiple @
 	}
@@ -88,11 +88,11 @@ func TestIsValidEmail(t *testing.T) {
 // Test Environment Variable Parsing
 func TestParseEnvInt(t *testing.T) {
 	tests := []struct {
-		name        string
-		envKey      string
-		defaultVal  int
-		setEnv      string
-		expected    int
+		name       string
+		envKey     string
+		defaultVal int
+		setEnv     string
+		expected   int
 	}{
 		{"missing env, use default", "TEST_VAR_MISSING", 42, "", 42},
 		{"valid number", "TEST_VAR_VALID", 42, "100", 100},
@@ -279,6 +279,30 @@ func TestBuildMessageWrapsPlainTextRawBodyWithHeaders(t *testing.T) {
 	}
 }
 
+func TestBuildMessagePreservesRawEmailBytes(t *testing.T) {
+	raw := "From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: Hello\r\n\r\nBody line 1\r\nBody line 2\r\n"
+	req := httptest.NewRequest("POST", "/inbound", nil)
+	msg, err := buildMessage(req, raw, "sender@example.com", []string{"recipient@example.com"}, "203.0.113.1", JSONPayload{})
+	if err != nil {
+		t.Fatalf("buildMessage returned error: %v", err)
+	}
+	if string(msg) != raw {
+		t.Fatalf("expected raw message bytes to be preserved exactly, got %q want %q", string(msg), raw)
+	}
+}
+
+func TestBuildMessageDoesNotTrimRawEmail(t *testing.T) {
+	raw := "\r\nFrom: sender@example.com\r\nTo: recipient@example.com\r\n\r\n"
+	req := httptest.NewRequest("POST", "/inbound", nil)
+	msg, err := buildMessage(req, raw, "sender@example.com", []string{"recipient@example.com"}, "203.0.113.1", JSONPayload{})
+	if err != nil {
+		t.Fatalf("buildMessage returned error: %v", err)
+	}
+	if string(msg) != raw {
+		t.Fatalf("expected raw message bytes to be preserved exactly, got %q want %q", string(msg), raw)
+	}
+}
+
 func TestParseEnvelopeJSONStringTo(t *testing.T) {
 	jsonBody := `{
 		"envelope": {
@@ -333,10 +357,10 @@ func TestBuildProxyHeaderUsesIPv4MappedIPv6ForMixedFamilies(t *testing.T) {
 // Test Client IP Detection
 func TestGetClientIP(t *testing.T) {
 	tests := []struct {
-		name      string
+		name       string
 		remoteAddr string
-		xffHeader string
-		expected  string
+		xffHeader  string
+		expected   string
 	}{
 		{"direct connection", "192.168.1.100:1234", "", "192.168.1.100"},
 		{"with X-Forwarded-For", "127.0.0.1:8080", "203.0.113.1, 203.0.113.2", "203.0.113.1"},

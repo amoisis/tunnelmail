@@ -496,17 +496,17 @@ type ErrorResponse struct {
 
 // JSONPayload is the request format sent by the Cloudflare email worker.
 type JSONPayload struct {
-	Raw         string            `json:"raw"`
-	Envelope    Envelope          `json:"envelope"`
-	Headers     MessageHeaders    `json:"headers"`
-	ClientIP    string            `json:"client_ip"`
-	EHLO        string            `json:"ehlo"`
-	AuthResults AuthResults       `json:"auth_results"`
-	SpamScore   string            `json:"spam_score"`
+	Raw         string         `json:"raw"`
+	Envelope    Envelope       `json:"envelope"`
+	Headers     MessageHeaders `json:"headers"`
+	ClientIP    string         `json:"client_ip"`
+	EHLO        string         `json:"ehlo"`
+	AuthResults AuthResults    `json:"auth_results"`
+	SpamScore   string         `json:"spam_score"`
 }
 
 type Envelope struct {
-	From string `json:"from"`
+	From string              `json:"from"`
 	To   StringOrStringSlice `json:"to"`
 }
 
@@ -643,10 +643,10 @@ type Metrics struct {
 }
 
 type telemetrySink struct {
-	requestCounter      otelMetric.Int64Counter
-	errorCounter        otelMetric.Int64Counter
-	latencyHistogram    otelMetric.Int64Histogram
-	logger              otelLog.Logger
+	requestCounter   otelMetric.Int64Counter
+	errorCounter     otelMetric.Int64Counter
+	latencyHistogram otelMetric.Int64Histogram
+	logger           otelLog.Logger
 }
 
 var globalTelemetry *telemetrySink
@@ -675,9 +675,9 @@ func (m *Metrics) IncrementError() {
 		globalTelemetry.errorCounter.Add(context.Background(), 1)
 	}
 }
-func (m *Metrics) IncrementRateLimit()        { atomic.AddInt64(&m.rateLimitExceeded, 1) }
-func (m *Metrics) IncrementTooBusy()          { atomic.AddInt64(&m.tooBusy, 1) }
-func (m *Metrics) IncrementPayloadTooLarge()  { atomic.AddInt64(&m.payloadTooLarge, 1) }
+func (m *Metrics) IncrementRateLimit()       { atomic.AddInt64(&m.rateLimitExceeded, 1) }
+func (m *Metrics) IncrementTooBusy()         { atomic.AddInt64(&m.tooBusy, 1) }
+func (m *Metrics) IncrementPayloadTooLarge() { atomic.AddInt64(&m.payloadTooLarge, 1) }
 func (m *Metrics) AddLatency(ms int64) {
 	atomic.AddInt64(&m.requestLatencyMs, ms)
 	if globalTelemetry != nil {
@@ -793,705 +793,712 @@ func initTelemetry() (func(context.Context) error, error) {
 }
 
 func main() {
-    smtpHost := os.Getenv("SMTP_HOST")
-    if smtpHost == "" {
-        log.Fatal("SMTP_HOST must be set")
-    }
+	smtpHost := os.Getenv("SMTP_HOST")
+	if smtpHost == "" {
+		log.Fatal("SMTP_HOST must be set")
+	}
 
-    // Validate SMTP server is not private/internal
-    if isPrivateIP(smtpHost) {
-        log.Fatal("SMTP_HOST cannot be a private IP (SSRF prevention)")
-    }
+	// Validate SMTP server is not private/internal
+	if isPrivateIP(smtpHost) {
+		log.Fatal("SMTP_HOST cannot be a private IP (SSRF prevention)")
+	}
 
-    // Get configuration
-    smtpTimeout := time.Duration(parseEnvInt("SMTP_TIMEOUT", 30)) * time.Second
-    smtpEhloHost := os.Getenv("SMTP_EHLO_HOST")
-    if smtpEhloHost == "" {
-        var err error
-        smtpEhloHost, err = os.Hostname()
-        if err != nil {
-            smtpEhloHost = "tunnelmail.local"
-        }
-    }
-    smtpEnvelopeFrom := strings.TrimSpace(os.Getenv("SMTP_ENVELOPE_FROM"))
-    if smtpEnvelopeFrom != "" && !isValidEmail(smtpEnvelopeFrom) {
-        log.Fatalf("SMTP_ENVELOPE_FROM is not a valid email address: %s", smtpEnvelopeFrom)
-    }
-    smtpUseProxyProtocol := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_USE_PROXY_PROTOCOL")), "true")
-    smtpEhloUseReverseDNS := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_EHLO_USE_CLIENT_REVERSE_DNS")), "true")
-    reverseDNSTimeout := time.Duration(parseEnvInt("SMTP_REVERSE_DNS_TIMEOUT_MS", 500)) * time.Millisecond
-    log.Printf("config: SMTP_HOST=%s SMTP_EHLO_HOST=%s SMTP_USE_PROXY_PROTOCOL=%v SMTP_EHLO_USE_CLIENT_REVERSE_DNS=%v", smtpHost, smtpEhloHost, smtpUseProxyProtocol, smtpEhloUseReverseDNS)
-    maxRequestSize := parseEnvInt64("MAX_REQUEST_SIZE", 100<<20) // 100MB default
-    rpsLimit := float64(parseEnvInt("RATE_LIMIT_RPS", 10))
-    concurrentLimit := parseEnvInt("MAX_CONCURRENT_REQUESTS", 100)
+	// Get configuration
+	smtpTimeout := time.Duration(parseEnvInt("SMTP_TIMEOUT", 30)) * time.Second
+	smtpEhloHost := os.Getenv("SMTP_EHLO_HOST")
+	if smtpEhloHost == "" {
+		var err error
+		smtpEhloHost, err = os.Hostname()
+		if err != nil {
+			smtpEhloHost = "tunnelmail.local"
+		}
+	}
+	smtpEnvelopeFrom := strings.TrimSpace(os.Getenv("SMTP_ENVELOPE_FROM"))
+	if smtpEnvelopeFrom != "" && !isValidEmail(smtpEnvelopeFrom) {
+		log.Fatalf("SMTP_ENVELOPE_FROM is not a valid email address: %s", smtpEnvelopeFrom)
+	}
+	smtpUseProxyProtocol := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_USE_PROXY_PROTOCOL")), "true")
+	smtpEhloUseReverseDNS := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_EHLO_USE_CLIENT_REVERSE_DNS")), "true")
+	reverseDNSTimeout := time.Duration(parseEnvInt("SMTP_REVERSE_DNS_TIMEOUT_MS", 500)) * time.Millisecond
+	log.Printf("config: SMTP_HOST=%s SMTP_EHLO_HOST=%s SMTP_USE_PROXY_PROTOCOL=%v SMTP_EHLO_USE_CLIENT_REVERSE_DNS=%v", smtpHost, smtpEhloHost, smtpUseProxyProtocol, smtpEhloUseReverseDNS)
+	maxRequestSize := parseEnvInt64("MAX_REQUEST_SIZE", 100<<20) // 100MB default
+	rpsLimit := float64(parseEnvInt("RATE_LIMIT_RPS", 10))
+	concurrentLimit := parseEnvInt("MAX_CONCURRENT_REQUESTS", 100)
 
-    // Initialize rate limiter
-    rateLimiter := &RateLimiter{limiters: make(map[string]*time.Time)}
+	// Initialize rate limiter
+	rateLimiter := &RateLimiter{limiters: make(map[string]*time.Time)}
 
-    // Initialize concurrent request semaphore
-    semaphore := NewSemaphore(concurrentLimit)
+	// Initialize concurrent request semaphore
+	semaphore := NewSemaphore(concurrentLimit)
 
-    // Initialize metrics
-    metrics := &Metrics{}
+	// Initialize metrics
+	metrics := &Metrics{}
 
-    shutdownTelemetry, err := initTelemetry()
-    if err != nil {
-        log.Printf("telemetry init error: %v", err)
-    }
-    if shutdownTelemetry != nil {
-        defer func() {
-            if shutdownErr := shutdownTelemetry(context.Background()); shutdownErr != nil {
-                log.Printf("telemetry shutdown error: %v", shutdownErr)
-            }
-        }()
-    }
+	shutdownTelemetry, err := initTelemetry()
+	if err != nil {
+		log.Printf("telemetry init error: %v", err)
+	}
+	if shutdownTelemetry != nil {
+		defer func() {
+			if shutdownErr := shutdownTelemetry(context.Background()); shutdownErr != nil {
+				log.Printf("telemetry shutdown error: %v", shutdownErr)
+			}
+		}()
+	}
 
-    // Task 17: Health Check Endpoint with Metrics
-    http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-        w.Header().Set("Content-Type", "application/json")
-        w.WriteHeader(http.StatusOK)
-        stats := metrics.GetStats()
-        response := map[string]interface{}{
-            "status":  "ok",
-            "metrics": stats,
-        }
-        json.NewEncoder(w).Encode(response)
-    })
+	// Task 17: Health Check Endpoint with Metrics
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		stats := metrics.GetStats()
+		response := map[string]interface{}{
+			"status":  "ok",
+			"metrics": stats,
+		}
+		json.NewEncoder(w).Encode(response)
+	})
 
-    // Main handler with all middleware
-    http.HandleFunc("/inbound", func(w http.ResponseWriter, r *http.Request) {
-        tracer := otel.Tracer("tunnelmail")
-        ctx, span := tracer.Start(r.Context(), "inbound.request")
-        defer span.End()
-        r = r.WithContext(ctx)
+	// Main handler with all middleware
+	http.HandleFunc("/inbound", func(w http.ResponseWriter, r *http.Request) {
+		tracer := otel.Tracer("tunnelmail")
+		ctx, span := tracer.Start(r.Context(), "inbound.request")
+		defer span.End()
+		r = r.WithContext(ctx)
 
-        logger := &RequestLogger{
-            method:    r.Method,
-            path:      r.RequestURI,
-            remoteIP:  getClientIP(r),
-            startTime: time.Now(),
-        }
+		logger := &RequestLogger{
+			method:    r.Method,
+			path:      r.RequestURI,
+			remoteIP:  getClientIP(r),
+			startTime: time.Now(),
+		}
 
-        metrics.IncrementRequest()
+		metrics.IncrementRequest()
 
-        // Task 8: Concurrent limit check
-        if !semaphore.Acquire() {
-            metrics.IncrementTooBusy()
-            metrics.IncrementError()
-            span.SetStatus(codes.Error, "service too busy")
-            sendErrorResponse(w, http.StatusTooManyRequests, "TOO_BUSY", "service too busy")
-            logger.Log(http.StatusTooManyRequests, nil)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
-        defer semaphore.Release()
+		// Task 8: Concurrent limit check
+		if !semaphore.Acquire() {
+			metrics.IncrementTooBusy()
+			metrics.IncrementError()
+			span.SetStatus(codes.Error, "service too busy")
+			sendErrorResponse(w, http.StatusTooManyRequests, "TOO_BUSY", "service too busy")
+			logger.Log(http.StatusTooManyRequests, nil)
+			metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+			return
+		}
+		defer semaphore.Release()
 
-        // Task 3: Enforce request size limit
-        if r.ContentLength > 0 && r.ContentLength > maxRequestSize {
-            metrics.IncrementPayloadTooLarge()
-            metrics.IncrementError()
-            span.SetStatus(codes.Error, "request body too large")
-            sendErrorResponse(w, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "request body too large")
-            logger.Log(http.StatusRequestEntityTooLarge, nil)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
+		// Task 3: Enforce request size limit
+		if r.ContentLength > 0 && r.ContentLength > maxRequestSize {
+			metrics.IncrementPayloadTooLarge()
+			metrics.IncrementError()
+			span.SetStatus(codes.Error, "request body too large")
+			sendErrorResponse(w, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "request body too large")
+			logger.Log(http.StatusRequestEntityTooLarge, nil)
+			metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+			return
+		}
 
-        var payload JSONPayload
-        var isJSON bool
-        contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
-        if contentType == "application/json" {
-            isJSON = true
-            if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestSize)).Decode(&payload); err != nil {
-                metrics.IncrementError()
-                span.RecordError(err)
-                span.SetStatus(codes.Error, "invalid json payload")
-                sendErrorResponse(w, http.StatusBadRequest, "INVALID_JSON", "invalid JSON payload")
-                logger.Log(http.StatusBadRequest, err)
-                metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-                return
-            }
-        } else {
-            if err := r.ParseMultipartForm(maxRequestSize); err != nil {
-                metrics.IncrementError()
-                span.RecordError(err)
-                span.SetStatus(codes.Error, "invalid multipart form")
-                sendErrorResponse(w, http.StatusBadRequest, "INVALID_MULTIPART", "invalid multipart form")
-                logger.Log(http.StatusBadRequest, err)
-                metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-                return
-            }
-        }
+		var payload JSONPayload
+		var isJSON bool
+		contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+		if contentType == "application/json" {
+			isJSON = true
+			if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestSize)).Decode(&payload); err != nil {
+				metrics.IncrementError()
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "invalid json payload")
+				sendErrorResponse(w, http.StatusBadRequest, "INVALID_JSON", "invalid JSON payload")
+				logger.Log(http.StatusBadRequest, err)
+				metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+				return
+			}
+		} else {
+			if err := r.ParseMultipartForm(maxRequestSize); err != nil {
+				metrics.IncrementError()
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "invalid multipart form")
+				sendErrorResponse(w, http.StatusBadRequest, "INVALID_MULTIPART", "invalid multipart form")
+				logger.Log(http.StatusBadRequest, err)
+				metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+				return
+			}
+		}
 
-        // Extract the real client IP from FormData/headers/JSON payload.
-        clientIP := extractClientIP(r, payload)
-        logger.remoteIP = clientIP
-        span.SetAttributes(
-            attribute.String("client.ip", clientIP),
-            attribute.String("http.method", r.Method),
-            attribute.String("http.route", "/inbound"),
-        )
+		// Extract the real client IP from FormData/headers/JSON payload.
+		clientIP := extractClientIP(r, payload)
+		logger.remoteIP = clientIP
+		span.SetAttributes(
+			attribute.String("client.ip", clientIP),
+			attribute.String("http.method", r.Method),
+			attribute.String("http.route", "/inbound"),
+		)
 
-        // Determine the EHLO hostname. The upstream worker may provide one;
-        // otherwise, when enabled, prefer the reverse DNS of the original
-        // client IP to avoid HELO/PTR mismatches in spam filters.
-        ehloHost := smtpEhloHost
-        if payload.EHLO != "" {
-            ehloHost = sanitizeHeader(payload.EHLO)
-            log.Printf("using EHLO hostname from upstream: %s", ehloHost)
-        } else if smtpEhloUseReverseDNS && clientIP != "" {
-            if ptr := reverseDNS(clientIP, reverseDNSTimeout); ptr != "" {
-                log.Printf("using reverse DNS EHLO hostname for %s: %s", clientIP, ptr)
-                ehloHost = ptr
-            } else {
-                log.Printf("reverse DNS lookup failed for %s, using EHLO hostname %s", clientIP, smtpEhloHost)
-            }
-        }
+		// Determine the EHLO hostname. The upstream worker may provide one;
+		// otherwise, when enabled, prefer the reverse DNS of the original
+		// client IP to avoid HELO/PTR mismatches in spam filters.
+		ehloHost := smtpEhloHost
+		if payload.EHLO != "" {
+			ehloHost = sanitizeHeader(payload.EHLO)
+			log.Printf("using EHLO hostname from upstream: %s", ehloHost)
+		} else if smtpEhloUseReverseDNS && clientIP != "" {
+			if ptr := reverseDNS(clientIP, reverseDNSTimeout); ptr != "" {
+				log.Printf("using reverse DNS EHLO hostname for %s: %s", clientIP, ptr)
+				ehloHost = ptr
+			} else {
+				log.Printf("reverse DNS lookup failed for %s, using EHLO hostname %s", clientIP, smtpEhloHost)
+			}
+		}
 
-        // Task 7: Rate limit check
-        if !rateLimiter.Allow(clientIP, rpsLimit) {
-            metrics.IncrementRateLimit()
-            metrics.IncrementError()
-            span.SetStatus(codes.Error, "rate limit exceeded")
-            sendErrorResponse(w, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "rate limit exceeded")
-            logger.Log(http.StatusTooManyRequests, nil)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
+		// Task 7: Rate limit check
+		if !rateLimiter.Allow(clientIP, rpsLimit) {
+			metrics.IncrementRateLimit()
+			metrics.IncrementError()
+			span.SetStatus(codes.Error, "rate limit exceeded")
+			sendErrorResponse(w, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "rate limit exceeded")
+			logger.Log(http.StatusTooManyRequests, nil)
+			metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+			return
+		}
 
-        envelopeFrom, recipients, err := parseEnvelope(r, payload)
-        if err != nil {
-            metrics.IncrementError()
-            span.RecordError(err)
-            span.SetStatus(codes.Error, err.Error())
-            sendErrorResponse(w, http.StatusBadRequest, "INVALID_ENVELOPE", err.Error())
-            logger.Log(http.StatusBadRequest, err)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
+		envelopeFrom, recipients, err := parseEnvelope(r, payload)
+		if err != nil {
+			metrics.IncrementError()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			sendErrorResponse(w, http.StatusBadRequest, "INVALID_ENVELOPE", err.Error())
+			logger.Log(http.StatusBadRequest, err)
+			metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+			return
+		}
 
-        // SMTP envelope sender may need to be a domain the relay server accepts,
-        // while the original From header is preserved inside the message body.
-        mailFrom := envelopeFrom
-        if smtpEnvelopeFrom != "" {
-            mailFrom = smtpEnvelopeFrom
-        }
+		// SMTP envelope sender may need to be a domain the relay server accepts,
+		// while the original From header is preserved inside the message body.
+		mailFrom := envelopeFrom
+		if smtpEnvelopeFrom != "" {
+			mailFrom = smtpEnvelopeFrom
+		}
 
-        rawEmail := strings.TrimSpace(r.FormValue("email"))
-        if isJSON {
-            rawEmail = strings.TrimSpace(payload.Raw)
-        }
-        messageData, err := buildMessage(r, rawEmail, envelopeFrom, recipients, clientIP, payload)
-        if err != nil {
-            metrics.IncrementError()
-            span.RecordError(err)
-            span.SetStatus(codes.Error, "failed to build message")
-            log.Printf("build message error: %v", err)
-            sendErrorResponse(w, http.StatusBadRequest, "BUILD_FAILED", "failed to build message")
-            logger.Log(http.StatusBadRequest, err)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
+		rawEmail := r.FormValue("email")
+		preserveMessageBytes := false
+		if isJSON {
+			rawEmail = payload.Raw
+		}
+		if rawEmail != "" {
+			preserveMessageBytes = true
+		}
+		messageData, err := buildMessage(r, rawEmail, envelopeFrom, recipients, clientIP, payload)
+		if err != nil {
+			metrics.IncrementError()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to build message")
+			log.Printf("build message error: %v", err)
+			sendErrorResponse(w, http.StatusBadRequest, "BUILD_FAILED", "failed to build message")
+			logger.Log(http.StatusBadRequest, err)
+			metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+			return
+		}
 
-        // Task 4: Use SMTP connection with timeout and proper cleanup (Task 5)
-        client, err := newSMTPSession(smtpHost, ehloHost, clientIP, smtpUseProxyProtocol, smtpTimeout)
-        if err != nil {
-            metrics.IncrementError()
-            span.RecordError(err)
-            span.SetStatus(codes.Error, "SMTP connection failed")
-            log.Printf("smtp dial error: %v", err)
-            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_CONNECT_FAILED", "SMTP connection failed", err.Error())
-            logger.Log(http.StatusBadGateway, err)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
-        defer client.Close()
+		// Task 4: Use SMTP connection with timeout and proper cleanup (Task 5)
+		client, err := newSMTPSession(smtpHost, ehloHost, clientIP, smtpUseProxyProtocol, smtpTimeout)
+		if err != nil {
+			metrics.IncrementError()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "SMTP connection failed")
+			log.Printf("smtp dial error: %v", err)
+			sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_CONNECT_FAILED", "SMTP connection failed", err.Error())
+			logger.Log(http.StatusBadGateway, err)
+			metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+			return
+		}
+		defer client.Close()
 
-        if err := client.Mail(mailFrom); err != nil {
-            metrics.IncrementError()
-            span.RecordError(err)
-            span.SetStatus(codes.Error, "SMTP operation failed")
-            log.Printf("smtp mail error: %v", err)
-            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP MAIL FROM failed", err.Error())
-            logger.Log(http.StatusBadGateway, err)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
+		if err := client.Mail(mailFrom); err != nil {
+			metrics.IncrementError()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "SMTP operation failed")
+			log.Printf("smtp mail error: %v", err)
+			sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP MAIL FROM failed", err.Error())
+			logger.Log(http.StatusBadGateway, err)
+			metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+			return
+		}
 
-        for _, recipient := range recipients {
-            if err := client.Rcpt(recipient); err != nil {
-                metrics.IncrementError()
-                span.RecordError(err)
-                span.SetStatus(codes.Error, "SMTP operation failed")
-            	log.Printf("smtp rcpt error: %v", err)
-            	sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", fmt.Sprintf("SMTP RCPT TO <%s> failed", recipient), err.Error())
-            	logger.Log(http.StatusBadGateway, err)
-            	metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            	return
-            }
-        }
+		for _, recipient := range recipients {
+			if err := client.Rcpt(recipient); err != nil {
+				metrics.IncrementError()
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "SMTP operation failed")
+				log.Printf("smtp rcpt error: %v", err)
+				sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", fmt.Sprintf("SMTP RCPT TO <%s> failed", recipient), err.Error())
+				logger.Log(http.StatusBadGateway, err)
+				metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+				return
+			}
+		}
 
-        wc, err := client.Data()
-        if err != nil {
-            metrics.IncrementError()
-            span.RecordError(err)
-            span.SetStatus(codes.Error, "SMTP operation failed")
-            log.Printf("smtp data error: %v", err)
-            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP DATA command failed", err.Error())
-            logger.Log(http.StatusBadGateway, err)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
+		wc, err := client.Data()
+		if err != nil {
+			metrics.IncrementError()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "SMTP operation failed")
+			log.Printf("smtp data error: %v", err)
+			sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP DATA command failed", err.Error())
+			logger.Log(http.StatusBadGateway, err)
+			metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+			return
+		}
 
-        // Ensure the message ends with CRLF so the DATA terminator is on its own line.
-        if len(messageData) > 0 && !bytes.HasSuffix(messageData, []byte("\r\n")) {
-            messageData = append(messageData, '\r', '\n')
-        }
+		// Preserve the original byte-for-byte content for raw messages.
+		// Synthetic messages still need a trailing CRLF before the SMTP dot terminator.
+		if !preserveMessageBytes && len(messageData) > 0 && !bytes.HasSuffix(messageData, []byte("\r\n")) {
+			messageData = append(messageData, '\r', '\n')
+		}
 
-        log.Printf("SMTP DATA (%d bytes):\n%s", len(messageData), string(messageData))
+		log.Printf("SMTP DATA (%d bytes):\n%s", len(messageData), string(messageData))
 
-        _, err = wc.Write(messageData)
-        if err != nil {
-            wc.Close()
-            metrics.IncrementError()
-            span.RecordError(err)
-            span.SetStatus(codes.Error, "SMTP operation failed")
-            log.Printf("smtp write error: %v", err)
-            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP DATA write failed", err.Error())
-            logger.Log(http.StatusBadGateway, err)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
+		_, err = wc.Write(messageData)
+		if err != nil {
+			wc.Close()
+			metrics.IncrementError()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "SMTP operation failed")
+			log.Printf("smtp write error: %v", err)
+			sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP DATA write failed", err.Error())
+			logger.Log(http.StatusBadGateway, err)
+			metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+			return
+		}
 
-        // Close the DATA writer to send the terminating "." and read the
-        // server's acceptance response. This MUST happen before QUIT.
-        if err := wc.Close(); err != nil {
-            metrics.IncrementError()
-            span.RecordError(err)
-            span.SetStatus(codes.Error, "SMTP DATA acceptance failed")
-            log.Printf("smtp data close error: %v", err)
-            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP server rejected message data", err.Error())
-            logger.Log(http.StatusBadGateway, err)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
+		// Close the DATA writer to send the terminating "." and read the
+		// server's acceptance response. This MUST happen before QUIT.
+		if err := wc.Close(); err != nil {
+			metrics.IncrementError()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "SMTP DATA acceptance failed")
+			log.Printf("smtp data close error: %v", err)
+			sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP server rejected message data", err.Error())
+			logger.Log(http.StatusBadGateway, err)
+			metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+			return
+		}
 
-        // Capture the actual SMTP response code and message (queue ID).
-        smtpCode, smtpMsg, err := client.readFinalDataResponse()
-        if err != nil {
-            metrics.IncrementError()
-            span.RecordError(err)
-            span.SetStatus(codes.Error, "SMTP DATA acceptance failed")
-            log.Printf("smtp data response error: %v", err)
-            sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP server rejected message data", err.Error())
-            logger.Log(http.StatusBadGateway, err)
-            metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-            return
-        }
+		// Capture the actual SMTP response code and message (queue ID).
+		smtpCode, smtpMsg, err := client.readFinalDataResponse()
+		if err != nil {
+			metrics.IncrementError()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "SMTP DATA acceptance failed")
+			log.Printf("smtp data response error: %v", err)
+			sendErrorResponseWithDetails(w, http.StatusBadGateway, "SMTP_ERROR", "SMTP server rejected message data", err.Error())
+			logger.Log(http.StatusBadGateway, err)
+			metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+			return
+		}
 
-        if err := client.Quit(); err != nil {
-            // QUIT failures after successful DATA acceptance are not fatal;
-            // the message has already been queued by the server.
-            log.Printf("smtp quit warning: %v", err)
-        }
+		if err := client.Quit(); err != nil {
+			// QUIT failures after successful DATA acceptance are not fatal;
+			// the message has already been queued by the server.
+			log.Printf("smtp quit warning: %v", err)
+		}
 
-        span.SetStatus(codes.Ok, "accepted")
-        log.Printf("forwarded mail from %s to %v (%d bytes) smtp=%d %s", envelopeFrom, recipients, len(messageData), smtpCode, smtpMsg)
-        w.Header().Set("Content-Type", "application/json")
-        w.WriteHeader(http.StatusOK)
-        json.NewEncoder(w).Encode(map[string]interface{}{
-            "status":       "accepted",
-            "smtp_code":    smtpCode,
-            "smtp_message": smtpMsg,
-        })
-        logger.Log(http.StatusOK, nil)
-        metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
-    })
+		span.SetStatus(codes.Ok, "accepted")
+		log.Printf("forwarded mail from %s to %v (%d bytes) smtp=%d %s", envelopeFrom, recipients, len(messageData), smtpCode, smtpMsg)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":       "accepted",
+			"smtp_code":    smtpCode,
+			"smtp_message": smtpMsg,
+		})
+		logger.Log(http.StatusOK, nil)
+		metrics.AddLatency(time.Since(logger.startTime).Milliseconds())
+	})
 
-    port := os.Getenv("HTTP_PORT")
-    if port == "" {
-        port = "8080"
-    }
+	port := os.Getenv("HTTP_PORT")
+	if port == "" {
+		port = "8080"
+	}
 
-    // Task 11: Graceful shutdown
-    server := &http.Server{
-        Addr:         ":" + port,
-        Handler:      http.DefaultServeMux,
-        ReadTimeout:  30 * time.Second,
-        WriteTimeout: 30 * time.Second,
-    }
+	// Task 11: Graceful shutdown
+	server := &http.Server{
+		Addr:         ":" + port,
+		Handler:      http.DefaultServeMux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+	}
 
-    // Start server in goroutine
-    go func() {
-        log.Printf("listening on :%s", port)
-        if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            log.Fatal(err)
-        }
-    }()
+	// Start server in goroutine
+	go func() {
+		log.Printf("listening on :%s", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
 
-    // Wait for interrupt signal
-    sigChan := make(chan os.Signal, 1)
-    signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-    <-sigChan
+	// Wait for interrupt signal
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	<-sigChan
 
-    // Graceful shutdown with timeout
-    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-    defer cancel()
+	// Graceful shutdown with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-    log.Println("shutting down gracefully...")
-    if err := server.Shutdown(ctx); err != nil {
-        log.Printf("shutdown error: %v", err)
-    }
-    log.Println("server stopped")
+	log.Println("shutting down gracefully...")
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("shutdown error: %v", err)
+	}
+	log.Println("server stopped")
 }
 
 func parseEnvelope(r *http.Request, payload JSONPayload) (string, []string, error) {
-    from := strings.TrimSpace(payload.Envelope.From)
-    if from == "" {
-        from = strings.TrimSpace(r.FormValue("envelope.from"))
-    }
-    if from == "" {
-        from = strings.TrimSpace(r.FormValue("from"))
-    }
-    if from == "" {
-        if envRaw := strings.TrimSpace(r.FormValue("envelope")); envRaw != "" {
-            var env struct {
-                From string `json:"from"`
-            }
-            if err := json.Unmarshal([]byte(envRaw), &env); err == nil {
-                from = strings.TrimSpace(env.From)
-            }
-        }
-    }
+	from := strings.TrimSpace(payload.Envelope.From)
+	if from == "" {
+		from = strings.TrimSpace(r.FormValue("envelope.from"))
+	}
+	if from == "" {
+		from = strings.TrimSpace(r.FormValue("from"))
+	}
+	if from == "" {
+		if envRaw := strings.TrimSpace(r.FormValue("envelope")); envRaw != "" {
+			var env struct {
+				From string `json:"from"`
+			}
+			if err := json.Unmarshal([]byte(envRaw), &env); err == nil {
+				from = strings.TrimSpace(env.From)
+			}
+		}
+	}
 
-    if from == "" {
-        return "", nil, errors.New("missing envelope.from or from")
-    }
+	if from == "" {
+		return "", nil, errors.New("missing envelope.from or from")
+	}
 
-    // Task 2: Validate sender email address
-    if !isValidEmail(from) {
-        return "", nil, errors.New("invalid from email address")
-    }
+	// Task 2: Validate sender email address
+	if !isValidEmail(from) {
+		return "", nil, errors.New("invalid from email address")
+	}
 
-    var recipients []string
-    if len(payload.Envelope.To) > 0 {
-        recipients = payload.Envelope.To
-    }
-    if raw := strings.TrimSpace(r.FormValue("envelope.to")); raw != "" {
-        recipients = parseRecipients(raw)
-    }
-    if len(recipients) == 0 {
-        if envRaw := strings.TrimSpace(r.FormValue("envelope")); envRaw != "" {
-            var env struct {
-                To interface{} `json:"to"`
-            }
-            if err := json.Unmarshal([]byte(envRaw), &env); err == nil {
-                recipients = collectStrings(env.To)
-            }
-        }
-    }
-    if len(recipients) == 0 {
-        recipients = parseRecipients(strings.TrimSpace(r.FormValue("to")))
-    }
+	var recipients []string
+	if len(payload.Envelope.To) > 0 {
+		recipients = payload.Envelope.To
+	}
+	if raw := strings.TrimSpace(r.FormValue("envelope.to")); raw != "" {
+		recipients = parseRecipients(raw)
+	}
+	if len(recipients) == 0 {
+		if envRaw := strings.TrimSpace(r.FormValue("envelope")); envRaw != "" {
+			var env struct {
+				To interface{} `json:"to"`
+			}
+			if err := json.Unmarshal([]byte(envRaw), &env); err == nil {
+				recipients = collectStrings(env.To)
+			}
+		}
+	}
+	if len(recipients) == 0 {
+		recipients = parseRecipients(strings.TrimSpace(r.FormValue("to")))
+	}
 
-    if len(recipients) == 0 {
-        return "", nil, errors.New("missing envelope.to or to")
-    }
+	if len(recipients) == 0 {
+		return "", nil, errors.New("missing envelope.to or to")
+	}
 
-    // Task 2: Validate all recipient email addresses
-    for _, recipient := range recipients {
-        if !isValidEmail(recipient) {
-            return "", nil, errors.New("invalid recipient email address: " + recipient)
-        }
-    }
+	// Task 2: Validate all recipient email addresses
+	for _, recipient := range recipients {
+		if !isValidEmail(recipient) {
+			return "", nil, errors.New("invalid recipient email address: " + recipient)
+		}
+	}
 
-    return from, recipients, nil
+	return from, recipients, nil
 }
 
 func parseRecipients(raw string) []string {
-    raw = strings.TrimSpace(raw)
-    if raw == "" {
-        return nil
-    }
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
 
-    if strings.HasPrefix(raw, "{") || strings.HasPrefix(raw, "[") {
-        var parsed interface{}
-        if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
-            result := collectStrings(parsed)
-            if len(result) > 0 {
-                return result
-            }
-        }
-    }
+	if strings.HasPrefix(raw, "{") || strings.HasPrefix(raw, "[") {
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
+			result := collectStrings(parsed)
+			if len(result) > 0 {
+				return result
+			}
+		}
+	}
 
-    parts := strings.Split(raw, ",")
-    var recipients []string
-    for _, part := range parts {
-        if addr := strings.TrimSpace(part); addr != "" {
-            recipients = append(recipients, addr)
-        }
-    }
-    return recipients
+	parts := strings.Split(raw, ",")
+	var recipients []string
+	for _, part := range parts {
+		if addr := strings.TrimSpace(part); addr != "" {
+			recipients = append(recipients, addr)
+		}
+	}
+	return recipients
 }
 
 func collectStrings(value interface{}) []string {
-    switch v := value.(type) {
-    case string:
-        if s := strings.TrimSpace(v); s != "" {
-            return []string{s}
-        }
-    case []interface{}:
-        var result []string
-        for _, item := range v {
-            result = append(result, collectStrings(item)...)
-        }
-        return result
-    case map[string]interface{}:
-        var result []string
-        for _, item := range v {
-            result = append(result, collectStrings(item)...)
-        }
-        return result
-    }
-    return nil
+	switch v := value.(type) {
+	case string:
+		if s := strings.TrimSpace(v); s != "" {
+			return []string{s}
+		}
+	case []interface{}:
+		var result []string
+		for _, item := range v {
+			result = append(result, collectStrings(item)...)
+		}
+		return result
+	case map[string]interface{}:
+		var result []string
+		for _, item := range v {
+			result = append(result, collectStrings(item)...)
+		}
+		return result
+	}
+	return nil
 }
 
 func buildMessage(r *http.Request, rawEmail, envelopeFrom string, recipients []string, clientIP string, payload JSONPayload) ([]byte, error) {
-    if rawEmail != "" {
-        // RFC 5321 requires CRLF line endings in the SMTP DATA phase.
-        // Normalize the raw message so bare LF does not cause rejection.
-        // Also inject X-Originating-IP if the upstream proxy provided a client IP.
-        normalized := normalizeCRLF(rawEmail)
-        if !looksLikeRFC5322Message(normalized) {
-            subject := sanitizeHeader(strings.TrimSpace(r.FormValue("subject")))
-            if subject == "" {
-                subject = sanitizeHeader(payload.Headers.Subject)
-            }
-            headerLines := []string{
-                fmt.Sprintf("From: %s", sanitizeHeader(envelopeFrom)),
-                fmt.Sprintf("To: %s", sanitizeHeader(strings.Join(recipients, ", "))),
-            }
-            if subject != "" {
-                headerLines = append(headerLines, fmt.Sprintf("Subject: %s", subject))
-            }
-            normalized = strings.Join(headerLines, "\r\n") + "\r\n\r\n" + normalized
-        }
-        if clientIP != "" && !strings.Contains(normalized, "\nX-Originating-IP:") {
-            normalized = injectHeader(normalized, "X-Originating-IP", sanitizeHeader(clientIP))
-        }
-        normalized = injectAuthResults(normalized, payload)
-        normalized = ensureRequiredHeaders(normalized, envelopeFrom)
-        return []byte(normalized), nil
-    }
+	if rawEmail != "" {
+		if looksLikeRFC5322Message(rawEmail) {
+			// Preserve the exact bytes of a raw MIME message. Any injected headers,
+			// canonicalization, or whitespace changes will invalidate a DKIM signature.
+			return []byte(rawEmail), nil
+		}
 
-    headers, err := parseHeaders(r.FormValue("headers"))
-    if err != nil {
-        log.Printf("invalid headers: %v", err)
-    }
+		// Plain text/raw body input is not a full RFC 5322 message yet, so wrap it
+		// in basic headers rather than treating it as a complete message.
+		subject := sanitizeHeader(strings.TrimSpace(r.FormValue("subject")))
+		if subject == "" {
+			subject = sanitizeHeader(payload.Headers.Subject)
+		}
+		headerLines := []string{
+			fmt.Sprintf("From: %s", sanitizeHeader(envelopeFrom)),
+			fmt.Sprintf("To: %s", sanitizeHeader(strings.Join(recipients, ", "))),
+		}
+		if subject != "" {
+			headerLines = append(headerLines, fmt.Sprintf("Subject: %s", subject))
+		}
+		message := strings.Join(headerLines, "\r\n") + "\r\n\r\n" + rawEmail
+		if clientIP != "" && !strings.Contains(message, "\nX-Originating-IP:") {
+			message = injectHeader(message, "X-Originating-IP", sanitizeHeader(clientIP))
+		}
+		message = injectAuthResults(message, payload)
+		message = ensureRequiredHeaders(message, envelopeFrom)
+		return []byte(message), nil
+	}
 
-    subject := strings.TrimSpace(r.FormValue("subject"))
-    if subject == "" {
-        subject = headers.Get("Subject")
-    }
+	headers, err := parseHeaders(r.FormValue("headers"))
+	if err != nil {
+		log.Printf("invalid headers: %v", err)
+	}
 
-    from := envelopeFrom
-    toHeader := strings.Join(recipients, ", ")
+	subject := strings.TrimSpace(r.FormValue("subject"))
+	if subject == "" {
+		subject = headers.Get("Subject")
+	}
 
-    text := r.FormValue("text")
-    html := r.FormValue("html")
+	from := envelopeFrom
+	toHeader := strings.Join(recipients, ", ")
 
-    if text == "" && html == "" {
-        return nil, errors.New("missing text or html body")
-    }
+	text := r.FormValue("text")
+	html := r.FormValue("html")
 
-    attachments := gatherAttachments(r)
-    body, contentType, err := buildBody(text, html, attachments)
-    if err != nil {
-        return nil, err
-    }
+	if text == "" && html == "" {
+		return nil, errors.New("missing text or html body")
+	}
 
-    headers.Del("Content-Type")
-    headers.Del("Content-Transfer-Encoding")
-    headers.Del("MIME-Version")
-    headers.Set("MIME-Version", "1.0")
-    // Task 1: Sanitize headers to prevent CRLF injection
-    headers.Set("From", sanitizeHeader(from))
-    headers.Set("To", sanitizeHeader(toHeader))
-    if subject != "" {
-        headers.Set("Subject", sanitizeHeader(subject))
-    }
-    if headers.Get("Date") == "" {
-        headers.Set("Date", time.Now().UTC().Format(time.RFC1123Z))
-    }
-    if headers.Get("Message-ID") == "" {
-        headers.Set("Message-ID", fmt.Sprintf("<gateway.%d@localhost>", time.Now().UnixNano()))
-    }
-    if clientIP != "" && headers.Get("X-Originating-IP") == "" {
-        headers.Set("X-Originating-IP", sanitizeHeader(clientIP))
-    }
-    if payload.AuthResults.SPF != "" && headers.Get("X-AuthResults-SPF") == "" {
-        headers.Set("X-AuthResults-SPF", sanitizeHeader(payload.AuthResults.SPF))
-    }
-    if payload.AuthResults.DKIM != "" && headers.Get("X-AuthResults-DKIM") == "" {
-        headers.Set("X-AuthResults-DKIM", sanitizeHeader(payload.AuthResults.DKIM))
-    }
-    if payload.SpamScore != "" && headers.Get("X-Spam-Score") == "" {
-        headers.Set("X-Spam-Score", sanitizeHeader(payload.SpamScore))
-    }
-    headers.Set("Content-Type", contentType)
+	attachments := gatherAttachments(r)
+	body, contentType, err := buildBody(text, html, attachments)
+	if err != nil {
+		return nil, err
+	}
 
-    var buffer bytes.Buffer
-    for key, values := range headers {
-        for _, value := range values {
-            // Task 1: Sanitize all header values
-            fmt.Fprintf(&buffer, "%s: %s\r\n", sanitizeHeader(key), sanitizeHeader(value))
-        }
-    }
-    buffer.WriteString("\r\n")
-    buffer.Write(body)
-    return buffer.Bytes(), nil
+	headers.Del("Content-Type")
+	headers.Del("Content-Transfer-Encoding")
+	headers.Del("MIME-Version")
+	headers.Set("MIME-Version", "1.0")
+	// Task 1: Sanitize headers to prevent CRLF injection
+	headers.Set("From", sanitizeHeader(from))
+	headers.Set("To", sanitizeHeader(toHeader))
+	if subject != "" {
+		headers.Set("Subject", sanitizeHeader(subject))
+	}
+	if headers.Get("Date") == "" {
+		headers.Set("Date", time.Now().UTC().Format(time.RFC1123Z))
+	}
+	if headers.Get("Message-ID") == "" {
+		headers.Set("Message-ID", fmt.Sprintf("<gateway.%d@localhost>", time.Now().UnixNano()))
+	}
+	if clientIP != "" && headers.Get("X-Originating-IP") == "" {
+		headers.Set("X-Originating-IP", sanitizeHeader(clientIP))
+	}
+	if payload.AuthResults.SPF != "" && headers.Get("X-AuthResults-SPF") == "" {
+		headers.Set("X-AuthResults-SPF", sanitizeHeader(payload.AuthResults.SPF))
+	}
+	if payload.AuthResults.DKIM != "" && headers.Get("X-AuthResults-DKIM") == "" {
+		headers.Set("X-AuthResults-DKIM", sanitizeHeader(payload.AuthResults.DKIM))
+	}
+	if payload.SpamScore != "" && headers.Get("X-Spam-Score") == "" {
+		headers.Set("X-Spam-Score", sanitizeHeader(payload.SpamScore))
+	}
+	headers.Set("Content-Type", contentType)
+
+	var buffer bytes.Buffer
+	for key, values := range headers {
+		for _, value := range values {
+			// Task 1: Sanitize all header values
+			fmt.Fprintf(&buffer, "%s: %s\r\n", sanitizeHeader(key), sanitizeHeader(value))
+		}
+	}
+	buffer.WriteString("\r\n")
+	buffer.Write(body)
+	return buffer.Bytes(), nil
 }
 
 func parseHeaders(raw string) (textproto.MIMEHeader, error) {
-    header := make(textproto.MIMEHeader)
-    raw = strings.TrimSpace(raw)
-    if raw == "" {
-        return header, nil
-    }
+	header := make(textproto.MIMEHeader)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return header, nil
+	}
 
-    if !strings.HasSuffix(raw, "\r\n") {
-        raw += "\r\n"
-    }
-    raw += "\r\n"
+	if !strings.HasSuffix(raw, "\r\n") {
+		raw += "\r\n"
+	}
+	raw += "\r\n"
 
-    reader := bufio.NewReader(strings.NewReader(raw))
-    tp := textproto.NewReader(reader)
-    return tp.ReadMIMEHeader()
+	reader := bufio.NewReader(strings.NewReader(raw))
+	tp := textproto.NewReader(reader)
+	return tp.ReadMIMEHeader()
 }
 
 func gatherAttachments(r *http.Request) []*multipart.FileHeader {
-    if r.MultipartForm == nil {
-        return nil
-    }
-    var attachments []*multipart.FileHeader
-    for _, files := range r.MultipartForm.File {
-        for _, fh := range files {
-            if fh.Filename != "" {
-                attachments = append(attachments, fh)
-            }
-        }
-    }
-    return attachments
+	if r.MultipartForm == nil {
+		return nil
+	}
+	var attachments []*multipart.FileHeader
+	for _, files := range r.MultipartForm.File {
+		for _, fh := range files {
+			if fh.Filename != "" {
+				attachments = append(attachments, fh)
+			}
+		}
+	}
+	return attachments
 }
 
 func buildBody(text, html string, attachments []*multipart.FileHeader) ([]byte, string, error) {
-    if len(attachments) == 0 {
-        if text != "" && html != "" {
-            boundary := randomBoundary()
-            body := buildAlternativeBody(text, html, boundary)
-            return []byte(body), fmt.Sprintf(`multipart/alternative; boundary=%q`, boundary), nil
-        }
-        if html != "" {
-            return []byte(html), `text/html; charset=utf-8`, nil
-        }
-        return []byte(text), `text/plain; charset=utf-8`, nil
-    }
+	if len(attachments) == 0 {
+		if text != "" && html != "" {
+			boundary := randomBoundary()
+			body := buildAlternativeBody(text, html, boundary)
+			return []byte(body), fmt.Sprintf(`multipart/alternative; boundary=%q`, boundary), nil
+		}
+		if html != "" {
+			return []byte(html), `text/html; charset=utf-8`, nil
+		}
+		return []byte(text), `text/plain; charset=utf-8`, nil
+	}
 
-    var buffer bytes.Buffer
-    writer := multipart.NewWriter(&buffer)
-    boundary := writer.Boundary()
+	var buffer bytes.Buffer
+	writer := multipart.NewWriter(&buffer)
+	boundary := writer.Boundary()
 
-    partHeaders := make(textproto.MIMEHeader)
-    if text != "" && html != "" {
-        altBoundary := randomBoundary()
-        partHeaders.Set("Content-Type", fmt.Sprintf(`multipart/alternative; boundary=%q`, altBoundary))
-        part, err := writer.CreatePart(partHeaders)
-        if err != nil {
-            return nil, "", err
-        }
-        if _, err := io.WriteString(part, buildAlternativeBody(text, html, altBoundary)); err != nil {
-            return nil, "", err
-        }
-    } else if html != "" {
-        partHeaders.Set("Content-Type", `text/html; charset=utf-8`)
-        partHeaders.Set("Content-Transfer-Encoding", "7bit")
-        part, err := writer.CreatePart(partHeaders)
-        if err != nil {
-            return nil, "", err
-        }
-        if _, err := io.WriteString(part, html); err != nil {
-            return nil, "", err
-        }
-    } else {
-        partHeaders.Set("Content-Type", `text/plain; charset=utf-8`)
-        partHeaders.Set("Content-Transfer-Encoding", "7bit")
-        part, err := writer.CreatePart(partHeaders)
-        if err != nil {
-            return nil, "", err
-        }
-        if _, err := io.WriteString(part, text); err != nil {
-            return nil, "", err
-        }
-    }
+	partHeaders := make(textproto.MIMEHeader)
+	if text != "" && html != "" {
+		altBoundary := randomBoundary()
+		partHeaders.Set("Content-Type", fmt.Sprintf(`multipart/alternative; boundary=%q`, altBoundary))
+		part, err := writer.CreatePart(partHeaders)
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := io.WriteString(part, buildAlternativeBody(text, html, altBoundary)); err != nil {
+			return nil, "", err
+		}
+	} else if html != "" {
+		partHeaders.Set("Content-Type", `text/html; charset=utf-8`)
+		partHeaders.Set("Content-Transfer-Encoding", "7bit")
+		part, err := writer.CreatePart(partHeaders)
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := io.WriteString(part, html); err != nil {
+			return nil, "", err
+		}
+	} else {
+		partHeaders.Set("Content-Type", `text/plain; charset=utf-8`)
+		partHeaders.Set("Content-Transfer-Encoding", "7bit")
+		part, err := writer.CreatePart(partHeaders)
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := io.WriteString(part, text); err != nil {
+			return nil, "", err
+		}
+	}
 
-    for _, attachment := range attachments {
-        if err := appendAttachment(&buffer, writer, attachment); err != nil {
-            return nil, "", err
-        }
-    }
+	for _, attachment := range attachments {
+		if err := appendAttachment(&buffer, writer, attachment); err != nil {
+			return nil, "", err
+		}
+	}
 
-    if err := writer.Close(); err != nil {
-        return nil, "", err
-    }
+	if err := writer.Close(); err != nil {
+		return nil, "", err
+	}
 
-    return buffer.Bytes(), fmt.Sprintf(`multipart/mixed; boundary=%q`, boundary), nil
+	return buffer.Bytes(), fmt.Sprintf(`multipart/mixed; boundary=%q`, boundary), nil
 }
 
 func buildAlternativeBody(text, html, boundary string) string {
-    var builder strings.Builder
-    fmt.Fprintf(&builder, "--%s\r\n", boundary)
-    builder.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-    builder.WriteString(text)
-    builder.WriteString("\r\n")
-    fmt.Fprintf(&builder, "--%s\r\n", boundary)
-    builder.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
-    builder.WriteString(html)
-    builder.WriteString("\r\n")
-    fmt.Fprintf(&builder, "--%s--\r\n", boundary)
-    return builder.String()
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "--%s\r\n", boundary)
+	builder.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+	builder.WriteString(text)
+	builder.WriteString("\r\n")
+	fmt.Fprintf(&builder, "--%s\r\n", boundary)
+	builder.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
+	builder.WriteString(html)
+	builder.WriteString("\r\n")
+	fmt.Fprintf(&builder, "--%s--\r\n", boundary)
+	return builder.String()
 }
 
 func appendAttachment(buffer *bytes.Buffer, writer *multipart.Writer, attachment *multipart.FileHeader) error {
-    file, err := attachment.Open()
-    if err != nil {
-        return err
-    }
-    defer file.Close()
+	file, err := attachment.Open()
+	if err != nil {
+		return err
+	}
+	defer file.Close()
 
-    ext := filepath.Ext(attachment.Filename)
-    contentType := mime.TypeByExtension(ext)
-    if contentType == "" {
-        contentType = "application/octet-stream"
-    }
+	ext := filepath.Ext(attachment.Filename)
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
 
-    partHeaders := make(textproto.MIMEHeader)
-    partHeaders.Set("Content-Type", fmt.Sprintf(`%s; name=%q`, contentType, attachment.Filename))
-    partHeaders.Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, attachment.Filename))
-    partHeaders.Set("Content-Transfer-Encoding", "base64")
+	partHeaders := make(textproto.MIMEHeader)
+	partHeaders.Set("Content-Type", fmt.Sprintf(`%s; name=%q`, contentType, attachment.Filename))
+	partHeaders.Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, attachment.Filename))
+	partHeaders.Set("Content-Transfer-Encoding", "base64")
 
-    part, err := writer.CreatePart(partHeaders)
-    if err != nil {
-        return err
-    }
+	part, err := writer.CreatePart(partHeaders)
+	if err != nil {
+		return err
+	}
 
-    encoder := base64.NewEncoder(base64.StdEncoding, part)
-    if _, err := io.Copy(encoder, file); err != nil {
-        encoder.Close()
-        return err
-    }
-    return encoder.Close()
+	encoder := base64.NewEncoder(base64.StdEncoding, part)
+	if _, err := io.Copy(encoder, file); err != nil {
+		encoder.Close()
+		return err
+	}
+	return encoder.Close()
 }
 
 func randomBoundary() string {
-    return fmt.Sprintf("BOUNDARY_%d", time.Now().UnixNano())
+	return fmt.Sprintf("BOUNDARY_%d", time.Now().UnixNano())
 }
