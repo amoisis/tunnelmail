@@ -57,27 +57,74 @@ func normalizeCRLF(s string) string {
 	return strings.ReplaceAll(s, "\n", "\r\n")
 }
 
+func splitHeaderAndBody(message string) (string, string, bool) {
+	normalized := normalizeCRLF(message)
+	if normalized == "" {
+		return "", "", false
+	}
+	if idx := strings.Index(normalized, "\r\n\r\n"); idx >= 0 {
+		return normalized[:idx], normalized[idx+4:], true
+	}
+	if idx := strings.Index(normalized, "\n\n"); idx >= 0 {
+		return normalized[:idx], normalized[idx+2:], true
+	}
+	return "", "", false
+}
+
+func hasHeader(message, name string) bool {
+	headerSection, _, ok := splitHeaderAndBody(message)
+	if !ok {
+		return false
+	}
+	want := strings.ToLower(strings.TrimSpace(name))
+	for _, line := range strings.Split(headerSection, "\r\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		if idx := strings.Index(line, ":"); idx > 0 {
+			if strings.EqualFold(strings.TrimSpace(line[:idx]), want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // injectHeader inserts a header into an RFC 5322 message after the existing
 // headers and before the body separator. The message is assumed to use CRLF
 // line endings.
 func injectHeader(message, name, value string) string {
-	idx := strings.Index(message, "\r\n\r\n")
-	if idx == -1 {
-		return message + "\r\n" + name + ": " + value + "\r\n"
+	if idx := strings.Index(message, "\r\n\r\n"); idx >= 0 {
+		prefix := message[:idx]
+		if prefix != "" && !strings.HasSuffix(prefix, "\r\n") {
+			prefix += "\r\n"
+		}
+		return prefix + name + ": " + value + "\r\n" + message[idx:]
 	}
-	return message[:idx] + name + ": " + value + "\r\n" + message[idx:]
+	if idx := strings.Index(message, "\n\n"); idx >= 0 {
+		prefix := message[:idx]
+		if prefix != "" && !strings.HasSuffix(prefix, "\n") {
+			prefix += "\n"
+		}
+		return prefix + name + ": " + value + "\n" + message[idx:]
+	}
+	return message + "\r\n" + name + ": " + value + "\r\n"
 }
 
 // injectAuthResults adds X-AuthResults-* and X-Spam-Score headers from the
 // upstream worker into a raw email message when they are not already present.
 func injectAuthResults(message string, payload JSONPayload) string {
-	if payload.AuthResults.SPF != "" && !strings.Contains(message, "\nX-AuthResults-SPF:") {
+	if payload.AuthResults.SPF != "" && !hasHeader(message, "X-AuthResults-SPF") {
 		message = injectHeader(message, "X-AuthResults-SPF", sanitizeHeader(payload.AuthResults.SPF))
 	}
-	if payload.AuthResults.DKIM != "" && !strings.Contains(message, "\nX-AuthResults-DKIM:") {
+	if payload.AuthResults.DKIM != "" && !hasHeader(message, "X-AuthResults-DKIM") {
 		message = injectHeader(message, "X-AuthResults-DKIM", sanitizeHeader(payload.AuthResults.DKIM))
 	}
-	if payload.SpamScore != "" && !strings.Contains(message, "\nX-Spam-Score:") {
+	if payload.SpamScore != "" && !hasHeader(message, "X-Spam-Score") {
 		message = injectHeader(message, "X-Spam-Score", sanitizeHeader(payload.SpamScore))
 	}
 	return message
@@ -87,10 +134,10 @@ func injectAuthResults(message string, payload JSONPayload) string {
 // from a raw email message. Spam filters heavily penalize messages without
 // these headers.
 func ensureRequiredHeaders(message, from string) string {
-	if !strings.Contains(message, "\nDate:") && !strings.HasPrefix(message, "Date:") {
+	if !hasHeader(message, "Date") {
 		message = injectHeader(message, "Date", time.Now().UTC().Format(time.RFC1123Z))
 	}
-	if !strings.Contains(message, "\nMessage-ID:") && !strings.HasPrefix(message, "Message-ID:") {
+	if !hasHeader(message, "Message-ID") {
 		domain := "localhost"
 		if from != "" {
 			parts := strings.Split(from, "@")
@@ -104,20 +151,27 @@ func ensureRequiredHeaders(message, from string) string {
 }
 
 func looksLikeRFC5322Message(message string) bool {
-	normalized := normalizeCRLF(message)
-	if strings.Contains(normalized, "\r\n\r\n") {
-		return true
+	headerSection, _, ok := splitHeaderAndBody(message)
+	if !ok {
+		return false
 	}
-	for _, line := range strings.Split(normalized, "\r\n") {
+	if strings.TrimSpace(headerSection) == "" {
+		return false
+	}
+	headerCount := 0
+	for _, line := range strings.Split(headerSection, "\r\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
-			return true
+			continue
 		}
-		if strings.Contains(trimmed, ":") {
-			return true
+		if line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		if idx := strings.Index(line, ":"); idx > 0 {
+			headerCount++
 		}
 	}
-	return false
+	return headerCount > 0
 }
 
 // Task 2: Email Validation
@@ -983,7 +1037,7 @@ func main() {
 			rawEmail = payload.Raw
 		}
 		if rawEmail != "" {
-			preserveMessageBytes = true
+			preserveMessageBytes = looksLikeRFC5322Message(rawEmail)
 		}
 		messageData, err := buildMessage(r, rawEmail, envelopeFrom, recipients, clientIP, payload)
 		if err != nil {

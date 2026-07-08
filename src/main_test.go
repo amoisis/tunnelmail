@@ -291,6 +291,23 @@ func TestBuildMessagePreservesRawEmailBytes(t *testing.T) {
 	}
 }
 
+func TestLooksLikeRFC5322MessageRejectsPlainTextBody(t *testing.T) {
+	if looksLikeRFC5322Message("Hello world\n\nThis is body text") {
+		t.Fatal("expected plain text body to be treated as non-RFC input")
+	}
+}
+
+func TestEnsureRequiredHeadersIgnoresBodyText(t *testing.T) {
+	msg := "From: sender@example.com\r\nTo: recipient@example.com\r\n\r\nDate: fake in body\r\n"
+	result := ensureRequiredHeaders(msg, "sender@example.com")
+	if !strings.Contains(result, "\r\nDate: ") {
+		t.Fatalf("expected Date header to be injected, got %q", result)
+	}
+	if !strings.Contains(result, "\r\nMessage-ID: ") {
+		t.Fatalf("expected Message-ID header to be injected, got %q", result)
+	}
+}
+
 func TestBuildMessageDoesNotTrimRawEmail(t *testing.T) {
 	raw := "\r\nFrom: sender@example.com\r\nTo: recipient@example.com\r\n\r\n"
 	req := httptest.NewRequest("POST", "/inbound", nil)
