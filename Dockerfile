@@ -1,5 +1,5 @@
 # Build stage: compile Go application
-FROM golang:1.26.4-alpine AS build
+FROM golang:1.27rc2-alpine AS build
 WORKDIR /app
 COPY go.mod go.sum* ./
 RUN go mod download
