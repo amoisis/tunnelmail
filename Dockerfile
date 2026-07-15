@@ -16,7 +16,7 @@ COPY --from=build /app/tunnelmail /usr/local/bin/tunnelmail
 ENV HTTP_PORT=8080
 USER app
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -q --spider http://127.0.0.1:${HTTP_PORT}/ || exit 1
+  CMD wget -q --spider http://127.0.0.1:${HTTP_PORT}/health || exit 1
 # EXPOSE matches HTTP_PORT default (8080); override with HTTP_PORT env var at runtime
 EXPOSE 8080
 CMD ["/usr/local/bin/tunnelmail"]
