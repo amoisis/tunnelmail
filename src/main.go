@@ -370,7 +370,8 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 		return nil, describeSMTPHandshakeError(host, useProxyProtocol, err)
 	}
 
-	smtpDebug := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_DEBUG_RAW")), "true")
+	smtpDebug := true // temporarily always-on to diagnose EHLO response format
+	_ = strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_DEBUG_RAW")), "true")
 	var conn net.Conn = rawConn
 	if smtpDebug {
 		conn = &loggingConn{rawConn}
