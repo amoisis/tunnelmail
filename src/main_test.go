@@ -367,7 +367,10 @@ func TestBuildProxyHeaderUsesIPv4MappedIPv6ForMixedFamilies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildProxyHeader returned error: %v", err)
 	}
-	if header != "PROXY TCP6 2a01:111:f403:c40d::4 ::ffff:10.0.10.16 0 25\r\n" {
+	// When source is IPv6 but destination resolves to IPv4, use "::" for the
+	// destination — the ::ffff: form is technically valid but rejected by some
+	// PROXY parsers (including Stalwart) in a TCP6 context.
+	if header != "PROXY TCP6 2a01:111:f403:c40d::4 :: 0 25\r\n" {
 		t.Fatalf("unexpected proxy header: %q", header)
 	}
 }

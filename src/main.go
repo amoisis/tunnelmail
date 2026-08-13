@@ -300,7 +300,12 @@ func buildProxyHeader(srcIP, dstHost string) (string, error) {
 		family = "TCP6"
 		if dst != nil {
 			if dst.To4() != nil {
-				dstStr = fmt.Sprintf("::ffff:%s", dst.String())
+				// Destination resolved to IPv4 (e.g. Docker overlay hostname).
+				// IPv4-mapped notation (::ffff:x.x.x.x) is technically valid
+				// but some PROXY parsers reject it in TCP6 context. Use "::"
+				// as a harmless placeholder; the destination address in a PROXY
+				// header is informational only for the receiving server.
+				dstStr = "::"
 			} else {
 				dstStr = dst.String()
 			}
