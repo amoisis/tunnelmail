@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -471,5 +472,161 @@ func BenchmarkMetricsIncrement(b *testing.B) {
 		m.IncrementRequest()
 		m.IncrementError()
 		m.AddLatency(100)
+	}
+}
+
+// mockSMTPServer starts a fake SMTP server that sends the provided script lines
+// to the client, then reads commands and replies with the given responses.
+// It returns the listener address and a channel that receives all commands the
+// server received (in order).
+func mockSMTPServer(t *testing.T, script func(conn net.Conn)) (addr string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("mockSMTPServer listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		script(conn)
+	}()
+	return ln.Addr().String()
+}
+
+func writeLine(conn net.Conn, s string) {
+	io.WriteString(conn, s+"\r\n")
+}
+
+func readLine(conn net.Conn) string {
+	buf := make([]byte, 4096)
+	n, _ := conn.Read(buf)
+	return strings.TrimRight(string(buf[:n]), "\r\n")
+}
+
+// TestSMTPSession_RFC_EHLO tests a standard RFC-compliant EHLO response where
+// the banner is the first line with a dash and capabilities follow.
+func TestSMTPSession_RFC_EHLO(t *testing.T) {
+	addr := mockSMTPServer(t, func(conn net.Conn) {
+		writeLine(conn, "220 test.example.com ESMTP ready")
+		readLine(conn) // consume EHLO
+		// Standard RFC multi-line EHLO: banner first with dash, last cap with space
+		writeLine(conn, "250-test.example.com Hello")
+		writeLine(conn, "250-STARTTLS")
+		writeLine(conn, "250-8BITMIME")
+		writeLine(conn, "250 SIZE 104857600")
+		readLine(conn) // MAIL FROM
+		writeLine(conn, "250 2.1.0 OK")
+		readLine(conn) // RCPT TO
+		writeLine(conn, "250 2.1.5 OK")
+		readLine(conn) // DATA
+		writeLine(conn, "354 Go ahead")
+		// client writes message + dot
+		buf := make([]byte, 4096)
+		for {
+			n, _ := conn.Read(buf)
+			if strings.Contains(string(buf[:n]), "\r\n.\r\n") {
+				break
+			}
+		}
+		writeLine(conn, "250 2.0.0 queued as abc123")
+		readLine(conn) // QUIT
+		writeLine(conn, "221 Bye")
+	})
+
+	sess, err := newSMTPSession(addr, "test.local", "", false, 5*time.Second)
+	if err != nil {
+		t.Fatalf("newSMTPSession: %v", err)
+	}
+	defer sess.Close()
+
+	if err := sess.Mail("from@example.com"); err != nil {
+		t.Fatalf("Mail: %v", err)
+	}
+	if err := sess.Rcpt("to@example.com"); err != nil {
+		t.Fatalf("Rcpt: %v", err)
+	}
+	wc, err := sess.Data()
+	if err != nil {
+		t.Fatalf("Data (expected 354 go-ahead): %v", err)
+	}
+	io.WriteString(wc, "Subject: test\r\n\r\nHello\r\n")
+	wc.Close()
+	code, msg, err := sess.readFinalDataResponse()
+	if err != nil {
+		t.Fatalf("readFinalDataResponse: %v", err)
+	}
+	if code != 250 {
+		t.Errorf("expected final DATA code 250, got %d %s", code, msg)
+	}
+}
+
+// TestSMTPSession_Stalwart_EHLO tests the Stalwart "you had me at HELO" pattern
+// where the server sends the banner as the FIRST line with a SPACE ("250 ")
+// making it look like a single-line response, then sends capability lines
+// with dashes ("250-") afterwards. This is what causes ReadResponse(250) to
+// return early leaving the capability lines in the read buffer.
+func TestSMTPSession_Stalwart_EHLO(t *testing.T) {
+	addr := mockSMTPServer(t, func(conn net.Conn) {
+		writeLine(conn, "220 stalwart.example.com ESMTP Stalwart Mail Server")
+		readLine(conn) // consume EHLO
+		// Stalwart pattern: "250 banner" (SPACE = RFC final) comes FIRST,
+		// then "250-CAPABILITY" lines follow. This breaks standard ReadResponse(250).
+		writeLine(conn, "250 stalwart.example.com you had me at HELO")
+		writeLine(conn, "250-STARTTLS")
+		writeLine(conn, "250-SMTPUTF8")
+		writeLine(conn, "250-SIZE 104857600")
+		writeLine(conn, "250-REQUIRETLS")
+		writeLine(conn, "250-PIPELINING")
+		writeLine(conn, "250-NO-SOLICITING")
+		writeLine(conn, "250-ENHANCEDSTATUSCODES")
+		writeLine(conn, "250-CHUNKING")
+		writeLine(conn, "250-BINARYMIME")
+		writeLine(conn, "250 8BITMIME")
+		readLine(conn) // MAIL FROM
+		writeLine(conn, "250 2.1.0 OK")
+		readLine(conn) // RCPT TO
+		writeLine(conn, "250 2.1.5 OK")
+		readLine(conn) // DATA
+		writeLine(conn, "354 Go ahead")
+		buf := make([]byte, 4096)
+		for {
+			n, _ := conn.Read(buf)
+			if strings.Contains(string(buf[:n]), "\r\n.\r\n") {
+				break
+			}
+		}
+		writeLine(conn, "250 2.0.0 queued as xyz789")
+		readLine(conn) // QUIT
+		writeLine(conn, "221 Bye")
+	})
+
+	sess, err := newSMTPSession(addr, "tunnelmail.local", "", false, 5*time.Second)
+	if err != nil {
+		t.Fatalf("newSMTPSession: %v", err)
+	}
+	defer sess.Close()
+
+	if err := sess.Mail("sender@westpac.com.au"); err != nil {
+		t.Fatalf("Mail: %v — EHLO left capability lines in the buffer, shifting all responses", err)
+	}
+	if err := sess.Rcpt("ariel@moisis.net"); err != nil {
+		t.Fatalf("Rcpt: %v", err)
+	}
+	wc, err := sess.Data()
+	if err != nil {
+		t.Fatalf("Data (expected 354 go-ahead, got something else — the RCPT response is still in buffer): %v", err)
+	}
+	io.WriteString(wc, "Subject: test\r\n\r\nHello\r\n")
+	wc.Close()
+	code, msg, err := sess.readFinalDataResponse()
+	if err != nil {
+		t.Fatalf("readFinalDataResponse: %v", err)
+	}
+	if code != 250 {
+		t.Errorf("expected final DATA code 250, got %d %s", code, msg)
 	}
 }

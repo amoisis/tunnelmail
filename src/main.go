@@ -14,7 +14,6 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
-	"net/smtp"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -314,17 +313,19 @@ func buildProxyHeader(srcIP, dstHost string) (string, error) {
 }
 
 // smtpResult holds the parsed response from a successful DATA acceptance so
+// smtpResult holds the parsed response from a successful DATA acceptance so
 // the upstream queue ID and SMTP code can be returned to the HTTP caller.
 type smtpResult struct {
 	Code    int    `json:"smtp_code"`
 	Message string `json:"smtp_message"`
 }
 
-// smtpSession wraps net/smtp.Client to provide reliable EHLO/MAIL/RCPT
-// handling while also capturing the final DATA acceptance response (queue ID)
-// that the stdlib WriteCloser.Close() discards.
+// smtpSession is a minimal SMTP client that gives us full control over the
+// command/response stream, including the ability to capture the queue ID
+// returned after the DATA terminator.
 type smtpSession struct {
-	client *smtp.Client
+	conn net.Conn
+	text *textproto.Conn
 }
 
 func describeSMTPHandshakeError(host string, useProxyProtocol bool, err error) error {
@@ -340,10 +341,39 @@ func describeSMTPHandshakeError(host string, useProxyProtocol bool, err error) e
 	return fmt.Errorf("%s", msg)
 }
 
+// loggingConn wraps a net.Conn and logs every raw byte received from the
+// server so we can see exactly what Stalwart sends during the EHLO handshake.
+// Enable by setting SMTP_DEBUG_RAW=true.
+type loggingConn struct {
+	net.Conn
+}
+
+func (lc *loggingConn) Read(b []byte) (int, error) {
+	n, err := lc.Conn.Read(b)
+	if n > 0 {
+		log.Printf("SMTP RAW <-- %q", string(b[:n]))
+	}
+	return n, err
+}
+
+func (lc *loggingConn) Write(b []byte) (int, error) {
+	n, err := lc.Conn.Write(b)
+	if n > 0 {
+		log.Printf("SMTP RAW --> %q", string(b[:n]))
+	}
+	return n, err
+}
+
 func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, timeout time.Duration) (*smtpSession, error) {
-	conn, err := net.DialTimeout("tcp", host, timeout)
+	rawConn, err := net.DialTimeout("tcp", host, timeout)
 	if err != nil {
 		return nil, describeSMTPHandshakeError(host, useProxyProtocol, err)
+	}
+
+	smtpDebug := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_DEBUG_RAW")), "true")
+	var conn net.Conn = rawConn
+	if smtpDebug {
+		conn = &loggingConn{rawConn}
 	}
 
 	if useProxyProtocol && clientIP != "" {
@@ -364,87 +394,149 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 		return nil, err
 	}
 
-	// Use net/smtp.NewClient which correctly handles multi-line EHLO responses,
-	// reads the server greeting, and sends EHLO/HELO with proper fallback.
-	c, err := smtp.NewClient(conn, host)
-	if err != nil {
-		conn.Close()
+	tc := textproto.NewConn(conn)
+	s := &smtpSession{conn: conn, text: tc}
+
+	// Read the server greeting (220).
+	if _, _, err := tc.ReadResponse(220); err != nil {
+		s.Close()
 		return nil, describeSMTPHandshakeError(host, useProxyProtocol, err)
 	}
 
+	// Send EHLO and fully drain the response. We can't use ReadResponse(250)
+	// directly because Stalwart sends its greeting banner as "250 hostname"
+	// (space = RFC final-line marker) as the FIRST line, followed by "250-EXT"
+	// capability lines. ReadResponse(250) sees the space on the first line and
+	// returns immediately, leaving all capability lines in the read buffer where
+	// they corrupt subsequent MAIL/RCPT/DATA command responses.
 	log.Printf("SMTP -> EHLO %s", localName)
-	if helloErr := c.Hello(localName); helloErr != nil {
-		c.Close()
-		return nil, helloErr
+	if err := tc.PrintfLine("EHLO %s", localName); err != nil {
+		s.Close()
+		return nil, err
 	}
-	// Log the advertised SMTP extensions after a successful EHLO.
-	for _, ext := range []string{
-		"STARTTLS", "SMTPUTF8", "SIZE", "REQUIRETLS", "PIPELINING",
-		"NO-SOLICITING", "ENHANCEDSTATUSCODES", "CHUNKING", "BINARYMIME", "8BITMIME",
-	} {
-		if ok, param := c.Extension(ext); ok {
-			if param != "" {
-				log.Printf("SMTP cap: %s %s", ext, param)
-			} else {
-				log.Printf("SMTP cap: %s", ext)
-			}
+	if err := drainEHLO(conn, tc, timeout); err != nil {
+		// Fall back to HELO.
+		log.Printf("EHLO failed (%v), trying HELO", err)
+		if err2 := tc.PrintfLine("HELO %s", localName); err2 != nil {
+			s.Close()
+			return nil, err2
+		}
+		if _, _, err2 := tc.ReadResponse(250); err2 != nil {
+			s.Close()
+			return nil, fmt.Errorf("HELO failed: %w", err2)
 		}
 	}
+	// Reset deadline to full timeout for remaining SMTP commands.
+	conn.SetDeadline(time.Now().Add(timeout))
 
-	return &smtpSession{client: c}, nil
+	return s, nil
+}
+
+// drainEHLO reads every "250-..." and "250 ..." line from the textproto
+// connection until it has consumed the true final line of the EHLO response.
+//
+// RFC 5321 says a multi-line response uses "250-text" for continuation lines
+// and "250 text" (space) for the final line. Standard parsers stop at the first
+// "250 " line. Stalwart however sends:
+//
+//	250 stalwart.example.com you had me at HELO   <- space = RFC says "final"
+//	250-STARTTLS
+//	250-SMTPUTF8
+//	...
+//	250 8BITMIME                                  <- actual last line
+//
+// We handle this by reading one line at a time. When we see a "250 " (final)
+// line we set a pendingFinal flag. On the next read: if another "250-" or
+// "250 " line arrives, Stalwart is still sending caps and we keep going. If
+// nothing arrives within a short deadline, we know we're done. This covers
+// both the RFC-standard ordering (dash lines first, space line last) and the
+// Stalwart ordering (space line first, dash lines after).
+func drainEHLO(conn net.Conn, tc *textproto.Conn, timeout time.Duration) error {
+	pendingFinal := false
+	peekDeadline := 50 * time.Millisecond
+	for {
+		line, err := tc.ReadLine()
+		if err != nil {
+			if pendingFinal {
+				// We already saw a "250 " line and the read timed out — done.
+				return nil
+			}
+			return fmt.Errorf("reading EHLO line: %w", err)
+		}
+		log.Printf("SMTP EHLO line: %q", line)
+		if len(line) < 3 || line[:3] != "250" {
+			if pendingFinal {
+				// Non-250 line after a "250 " — protocol error but EHLO done.
+				return nil
+			}
+			return fmt.Errorf("unexpected EHLO response: %q", line)
+		}
+		isFinal := len(line) == 3 || line[3] == ' '
+		if isFinal {
+			pendingFinal = true
+			// Set a short deadline to check if more lines are coming.
+			conn.SetReadDeadline(time.Now().Add(peekDeadline))
+		} else {
+			// "250-" continuation — clear pending, reset to full timeout.
+			pendingFinal = false
+			conn.SetReadDeadline(time.Now().Add(timeout))
+		}
+	}
 }
 
 func (s *smtpSession) Mail(from string) error {
 	log.Printf("SMTP -> MAIL FROM:<%s>", from)
-	err := s.client.Mail(from)
-	if err != nil {
-		log.Printf("SMTP MAIL error: %v", err)
-	} else {
-		log.Printf("SMTP MAIL FROM accepted")
+	if err := s.text.PrintfLine("MAIL FROM:<%s>", from); err != nil {
+		return err
 	}
+	code, msg, err := s.text.ReadResponse(250)
+	log.Printf("SMTP <- %d %s", code, msg)
 	return err
 }
 
 func (s *smtpSession) Rcpt(to string) error {
 	log.Printf("SMTP -> RCPT TO:<%s>", to)
-	err := s.client.Rcpt(to)
-	if err != nil {
-		log.Printf("SMTP RCPT error: %v", err)
-	} else {
-		log.Printf("SMTP RCPT TO accepted")
+	if err := s.text.PrintfLine("RCPT TO:<%s>", to); err != nil {
+		return err
 	}
+	code, msg, err := s.text.ReadResponse(25) // 250 or 251
+	log.Printf("SMTP <- %d %s", code, msg)
 	return err
 }
 
-// Data sends the DATA command, writes the message body via the returned
-// WriteCloser, closes it (sending the dot terminator), then reads and returns
-// the server's final acceptance response including the queue ID.
+// Data sends the DATA command and returns a WriteCloser for the message body.
+// After Close(), call readFinalDataResponse to get the queue ID.
 func (s *smtpSession) Data() (io.WriteCloser, error) {
 	log.Printf("SMTP -> DATA")
-	// Use the underlying textproto connection so we can capture the final 250.
-	if err := s.client.Text.PrintfLine("DATA"); err != nil {
+	if err := s.text.PrintfLine("DATA"); err != nil {
 		return nil, err
 	}
-	code, msg, err := s.client.Text.ReadResponse(354)
+	code, msg, err := s.text.ReadResponse(354)
 	log.Printf("SMTP <- %d %s", code, msg)
 	if err != nil {
 		return nil, err
 	}
-	return s.client.Text.DotWriter(), nil
+	return s.text.DotWriter(), nil
 }
 
 func (s *smtpSession) readFinalDataResponse() (int, string, error) {
-	code, msg, err := s.client.Text.ReadResponse(250)
+	code, msg, err := s.text.ReadResponse(250)
 	log.Printf("SMTP <- %d %s", code, msg)
 	return code, msg, err
 }
 
 func (s *smtpSession) Quit() error {
-	return s.client.Quit()
+	log.Printf("SMTP -> QUIT")
+	if err := s.text.PrintfLine("QUIT"); err != nil {
+		return err
+	}
+	code, msg, err := s.text.ReadResponse(221)
+	log.Printf("SMTP <- %d %s", code, msg)
+	return err
 }
 
 func (s *smtpSession) Close() error {
-	return s.client.Close()
+	return s.text.Close()
 }
 
 // Task 6: SSRF Prevention - Block private IPs
