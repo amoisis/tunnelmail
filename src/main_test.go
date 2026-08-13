@@ -564,18 +564,16 @@ func TestSMTPSession_RFC_EHLO(t *testing.T) {
 	}
 }
 
-// TestSMTPSession_Stalwart_EHLO tests the Stalwart "you had me at HELO" pattern
-// where the server sends the banner as the FIRST line with a SPACE ("250 ")
-// making it look like a single-line response, then sends capability lines
-// with dashes ("250-") afterwards. This is what causes ReadResponse(250) to
-// return early leaving the capability lines in the read buffer.
+// TestSMTPSession_Stalwart_EHLO tests the real Stalwart wire format confirmed
+// by raw packet capture. Stalwart is RFC-compliant: "250-" for all lines except
+// the last "250 8BITMIME". drainEHLO must read all 11 lines without a timeout.
 func TestSMTPSession_Stalwart_EHLO(t *testing.T) {
 	addr := mockSMTPServer(t, func(conn net.Conn) {
 		writeLine(conn, "220 stalwart.example.com ESMTP Stalwart Mail Server")
 		readLine(conn) // consume EHLO
-		// Stalwart pattern: "250 banner" (SPACE = RFC final) comes FIRST,
-		// then "250-CAPABILITY" lines follow. This breaks standard ReadResponse(250).
-		writeLine(conn, "250 stalwart.example.com you had me at HELO")
+		// Real Stalwart format (from raw packet capture): banner with dash first,
+		// capabilities with dashes, final "250 8BITMIME" with space.
+		writeLine(conn, "250-stalwart.example.com you had me at EHLO")
 		writeLine(conn, "250-STARTTLS")
 		writeLine(conn, "250-SMTPUTF8")
 		writeLine(conn, "250-SIZE 104857600")
@@ -628,5 +626,68 @@ func TestSMTPSession_Stalwart_EHLO(t *testing.T) {
 	}
 	if code != 250 {
 		t.Errorf("expected final DATA code 250, got %d %s", code, msg)
+	}
+}
+
+// TestSMTPSession_ProxyRejection tests the exact failure seen in production:
+// Stalwart is NOT configured for PROXY protocol, so the PROXY header is
+// rejected. The server sends "220 greeting\r\n500 Invalid command.\r\n" in a
+// single TCP write. textproto's bufio.Reader buffers the 500 alongside the 220.
+// We must drain that 500 after reading the 220, then EHLO must succeed normally.
+func TestSMTPSession_ProxyRejection(t *testing.T) {
+	addr := mockSMTPServer(t, func(conn net.Conn) {
+		// Simulate: client sends "PROXY TCP6 ...\r\n", server replies with
+		// greeting + rejection in the same write (one TCP segment).
+		readLine(conn)                                                              // consume PROXY header
+		io.WriteString(conn, "220 stalwart.example.com ESMTP ready\r\n500 5.5.1 Invalid command.\r\n") //nolint:errcheck
+		readLine(conn) // consume EHLO
+		// Normal EHLO response
+		writeLine(conn, "250-stalwart.example.com you had me at EHLO")
+		writeLine(conn, "250-STARTTLS")
+		writeLine(conn, "250 8BITMIME")
+		readLine(conn) // MAIL FROM
+		writeLine(conn, "250 2.1.0 OK")
+		readLine(conn) // RCPT TO
+		writeLine(conn, "250 2.1.5 OK")
+		readLine(conn) // DATA
+		writeLine(conn, "354 Go ahead")
+		buf := make([]byte, 4096)
+		for {
+			n, _ := conn.Read(buf)
+			if strings.Contains(string(buf[:n]), "\r\n.\r\n") {
+				break
+			}
+		}
+		writeLine(conn, "250 2.0.0 OK")
+		readLine(conn) // QUIT
+		writeLine(conn, "221 Bye")
+	})
+
+	// useProxyProtocol=true — the session will write a PROXY header.
+	// The mock server reads it and sends 220+500 together.
+	sess, err := newSMTPSession(addr, "tunnelmail.local", "2a01:111:f403:c40e::1", true, 5*time.Second)
+	if err != nil {
+		t.Fatalf("newSMTPSession: %v (500 after 220 was not drained or EHLO failed)", err)
+	}
+	defer sess.Close()
+
+	if err := sess.Mail("sender@westpac.com.au"); err != nil {
+		t.Fatalf("Mail: %v", err)
+	}
+	if err := sess.Rcpt("ariel@moisis.net"); err != nil {
+		t.Fatalf("Rcpt: %v", err)
+	}
+	wc, err := sess.Data()
+	if err != nil {
+		t.Fatalf("Data: expected 354, got error (likely 1-line response offset): %v", err)
+	}
+	io.WriteString(wc, "Subject: test\r\n\r\nHello\r\n")
+	wc.Close()
+	code, msg, err := sess.readFinalDataResponse()
+	if err != nil {
+		t.Fatalf("readFinalDataResponse: %v", err)
+	}
+	if code != 250 {
+		t.Errorf("expected 250, got %d %s", code, msg)
 	}
 }

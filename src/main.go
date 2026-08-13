@@ -370,8 +370,7 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 		return nil, describeSMTPHandshakeError(host, useProxyProtocol, err)
 	}
 
-	smtpDebug := true // temporarily always-on to diagnose EHLO response format
-	_ = strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_DEBUG_RAW")), "true")
+	smtpDebug := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_DEBUG_RAW")), "true")
 	var conn net.Conn = rawConn
 	if smtpDebug {
 		conn = &loggingConn{rawConn}
@@ -404,25 +403,37 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 		return nil, describeSMTPHandshakeError(host, useProxyProtocol, err)
 	}
 
-	// Send EHLO and fully drain the response. We can't use ReadResponse(250)
-	// directly because Stalwart sends its greeting banner as "250 hostname"
-	// (space = RFC final-line marker) as the FIRST line, followed by "250-EXT"
-	// capability lines. ReadResponse(250) sees the space on the first line and
-	// returns immediately, leaving all capability lines in the read buffer where
-	// they corrupt subsequent MAIL/RCPT/DATA command responses.
+	// Drain any unexpected responses that arrived in the same TCP segment as the
+	// 220 greeting. This happens when PROXY protocol is NOT enabled on the SMTP
+	// server: the server rejects the PROXY line with "500 Invalid command." which
+	// gets buffered alongside the 220 by textproto's internal bufio.Reader.
+	// Leaving it there would poison the EHLO response read below.
+	for tc.R.Buffered() > 0 {
+		extra, _ := tc.ReadLine()
+		log.Printf("SMTP warning: discarding unexpected response after 220 greeting: %q (if using SMTP_USE_PROXY_PROTOCOL, make sure the SMTP server has PROXY protocol support enabled)", extra)
+	}
+
+	// Send EHLO and drain the full response via drainEHLO.
 	log.Printf("SMTP -> EHLO %s", localName)
 	if err := tc.PrintfLine("EHLO %s", localName); err != nil {
 		s.Close()
 		return nil, err
 	}
-	if err := drainEHLO(conn, tc, timeout); err != nil {
-		// Fall back to HELO.
+	if err := drainEHLO(tc); err != nil {
+		// EHLO rejected — fall back to HELO. Before sending HELO, flush any
+		// partial EHLO response that may have arrived (e.g. Stalwart may have
+		// already queued its EHLO extension list alongside the error).
 		log.Printf("EHLO failed (%v), trying HELO", err)
+		drainStale(tc)
 		if err2 := tc.PrintfLine("HELO %s", localName); err2 != nil {
 			s.Close()
 			return nil, err2
 		}
-		if _, _, err2 := tc.ReadResponse(250); err2 != nil {
+		// Use drainEHLO for the HELO response too: Stalwart may send both the
+		// queued EHLO response and the HELO response in the same TCP segment,
+		// and ReadResponse(250) would stop at the wrong "250 " line, leaving
+		// the real HELO line buffered and creating a 1-line offset downstream.
+		if err2 := drainEHLO(tc); err2 != nil {
 			s.Close()
 			return nil, fmt.Errorf("HELO failed: %w", err2)
 		}
@@ -433,55 +444,52 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 	return s, nil
 }
 
-// drainEHLO reads every "250-..." and "250 ..." line from the textproto
-// connection until it has consumed the true final line of the EHLO response.
+// drainEHLO reads every EHLO/HELO response line until all "250" lines are
+// consumed. It handles:
+//   - Standard RFC ordering: "250-" continuation lines then a final "250 " line
+//   - Stalwart's confirmed wire format: "250-" banner, "250-" caps, "250 " final
 //
-// RFC 5321 says a multi-line response uses "250-text" for continuation lines
-// and "250 text" (space) for the final line. Standard parsers stop at the first
-// "250 " line. Stalwart however sends:
-//
-//	250 stalwart.example.com you had me at HELO   <- space = RFC says "final"
-//	250-STARTTLS
-//	250-SMTPUTF8
-//	...
-//	250 8BITMIME                                  <- actual last line
-//
-// We handle this by reading one line at a time. When we see a "250 " (final)
-// line we set a pendingFinal flag. On the next read: if another "250-" or
-// "250 " line arrives, Stalwart is still sending caps and we keep going. If
-// nothing arrives within a short deadline, we know we're done. This covers
-// both the RFC-standard ordering (dash lines first, space line last) and the
-// Stalwart ordering (space line first, dash lines after).
-func drainEHLO(conn net.Conn, tc *textproto.Conn, timeout time.Duration) error {
-	pendingFinal := false
-	peekDeadline := 50 * time.Millisecond
+// After seeing the RFC final ("250 " with a space at position 3), it checks
+// tc.R.Buffered() — if more bytes are waiting in the read buffer, Stalwart is
+// still sending and we peek the next 3 bytes. If they're "250", we keep
+// reading. This is instantaneous and not timing-dependent.
+func drainEHLO(tc *textproto.Conn) error {
 	for {
 		line, err := tc.ReadLine()
 		if err != nil {
-			if pendingFinal {
-				// We already saw a "250 " line and the read timed out — done.
-				return nil
-			}
 			return fmt.Errorf("reading EHLO line: %w", err)
 		}
 		log.Printf("SMTP EHLO line: %q", line)
 		if len(line) < 3 || line[:3] != "250" {
-			if pendingFinal {
-				// Non-250 line after a "250 " — protocol error but EHLO done.
-				return nil
-			}
 			return fmt.Errorf("unexpected EHLO response: %q", line)
 		}
+		// RFC 5321: "250 " (space at index 3) is the final line of the response.
 		isFinal := len(line) == 3 || line[3] == ' '
 		if isFinal {
-			pendingFinal = true
-			// Set a short deadline to check if more lines are coming.
-			conn.SetReadDeadline(time.Now().Add(peekDeadline))
-		} else {
-			// "250-" continuation — clear pending, reset to full timeout.
-			pendingFinal = false
-			conn.SetReadDeadline(time.Now().Add(timeout))
+			// Check if more "250" data is already in the read buffer.
+			// If yes, Stalwart sent additional capability lines after this
+			// "final" line and we must keep reading to drain them all.
+			if tc.R.Buffered() == 0 {
+				return nil // buffer is empty — we are done
+			}
+			peek, peekErr := tc.R.Peek(3)
+			if peekErr != nil || string(peek) != "250" {
+				return nil // next line is not a 250 — EHLO response is complete
+			}
+			// More "250" lines follow — Stalwart reversed ordering, keep going.
 		}
+	}
+}
+
+// drainStale discards any bytes already buffered in tc's internal bufio.Reader.
+// Used before sending HELO to flush leftover lines from a failed EHLO response.
+func drainStale(tc *textproto.Conn) {
+	for tc.R.Buffered() > 0 {
+		line, err := tc.ReadLine()
+		if err != nil {
+			break
+		}
+		log.Printf("SMTP stale line discarded: %q", line)
 	}
 }
 
