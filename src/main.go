@@ -424,7 +424,7 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 		s.Close()
 		return nil, err
 	}
-	if err := drainEHLO(tc); err != nil {
+	if err := drainEHLO(conn, tc); err != nil {
 		// EHLO rejected — fall back to HELO. Before sending HELO, flush any
 		// partial EHLO response that may have arrived (e.g. Stalwart may have
 		// already queued its EHLO extension list alongside the error).
@@ -434,11 +434,11 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 			s.Close()
 			return nil, err2
 		}
-		// Use drainEHLO for the HELO response too: Stalwart may send both the
-		// queued EHLO response and the HELO response in the same TCP segment,
-		// and ReadResponse(250) would stop at the wrong "250 " line, leaving
-		// the real HELO line buffered and creating a 1-line offset downstream.
-		if err2 := drainEHLO(tc); err2 != nil {
+		// Use drainEHLO for the HELO response too: Stalwart sends both the
+		// queued EHLO response and the HELO response after receiving HELO.
+		// They may arrive in the same TCP segment (handled by buffer peek) or
+		// in separate segments (handled by the short deadline fallback).
+		if err2 := drainEHLO(conn, tc); err2 != nil {
 			s.Close()
 			return nil, fmt.Errorf("HELO failed: %w", err2)
 		}
@@ -453,12 +453,18 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 // consumed. It handles:
 //   - Standard RFC ordering: "250-" continuation lines then a final "250 " line
 //   - Stalwart's confirmed wire format: "250-" banner, "250-" caps, "250 " final
+//   - HELO fallback: Stalwart sends EHLO response + HELO response back-to-back;
+//     these may arrive in the same TCP segment (instant buffer) or in separate
+//     segments (caught by a short read deadline).
 //
-// After seeing the RFC final ("250 " with a space at position 3), it checks
-// tc.R.Buffered() — if more bytes are waiting in the read buffer, Stalwart is
-// still sending and we peek the next 3 bytes. If they're "250", we keep
-// reading. This is instantaneous and not timing-dependent.
-func drainEHLO(tc *textproto.Conn) error {
+// After each "250 " final line:
+//  1. Check tc.R.Buffered() — if data is already in the buffer, peek 3 bytes.
+//     If "250", keep reading (same-segment case).
+//  2. If buffer is empty, set a 50ms read deadline and Peek(3) on the
+//     connection. If data arrives within 50ms and starts with "250", keep
+//     reading (separate-segment case). Otherwise EHLO is done.
+func drainEHLO(conn net.Conn, tc *textproto.Conn) error {
+	const laterSegmentWait = 50 * time.Millisecond
 	for {
 		line, err := tc.ReadLine()
 		if err != nil {
@@ -468,21 +474,29 @@ func drainEHLO(tc *textproto.Conn) error {
 		if len(line) < 3 || line[:3] != "250" {
 			return fmt.Errorf("unexpected EHLO response: %q", line)
 		}
-		// RFC 5321: "250 " (space at index 3) is the final line of the response.
-		isFinal := len(line) == 3 || line[3] == ' '
-		if isFinal {
-			// Check if more "250" data is already in the read buffer.
-			// If yes, Stalwart sent additional capability lines after this
-			// "final" line and we must keep reading to drain them all.
-			if tc.R.Buffered() == 0 {
-				return nil // buffer is empty — we are done
-			}
-			peek, peekErr := tc.R.Peek(3)
-			if peekErr != nil || string(peek) != "250" {
-				return nil // next line is not a 250 — EHLO response is complete
-			}
-			// More "250" lines follow — Stalwart reversed ordering, keep going.
+		// "250-" continuation — keep reading immediately.
+		if len(line) > 3 && line[3] == '-' {
+			continue
 		}
+		// "250 " or bare "250" — RFC final line.
+		// Fast path: check buffer for more "250" lines (same TCP segment).
+		if tc.R.Buffered() > 0 {
+			peek, peekErr := tc.R.Peek(3)
+			if peekErr == nil && string(peek) == "250" {
+				continue // more lines already buffered
+			}
+			return nil // non-250 data or peek error — EHLO done
+		}
+		// Slow path: buffer is empty. Wait briefly for a trailing segment.
+		// This catches the HELO fallback case where Stalwart sends the queued
+		// EHLO response and the HELO response in separate TCP segments.
+		conn.SetReadDeadline(time.Now().Add(laterSegmentWait))
+		peek, peekErr := tc.R.Peek(3)
+		conn.SetReadDeadline(time.Time{}) // restore to connection-level deadline
+		if peekErr != nil || string(peek) != "250" {
+			return nil // timed out or non-250 — EHLO done
+		}
+		// More "250" lines arrived in the next segment — keep reading.
 	}
 }
 

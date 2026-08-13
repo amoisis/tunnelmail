@@ -694,3 +694,70 @@ func TestSMTPSession_ProxyRejection(t *testing.T) {
 		t.Errorf("expected 250, got %d %s", code, msg)
 	}
 }
+
+// TestSMTPSession_ProxyRejection_SeparateSegments is the exact failure seen in
+// production with v0.6.10: Stalwart sends the EHLO response (11 lines) and the
+// HELO response (1 line) in SEPARATE writes, simulating separate TCP segments.
+// The buffer-only check returned nil after the 11th line; the 12th line then
+// poisoned MAIL FROM. The 50ms deadline fallback in drainEHLO catches this.
+func TestSMTPSession_ProxyRejection_SeparateSegments(t *testing.T) {
+	addr := mockSMTPServer(t, func(conn net.Conn) {
+		readLine(conn) // consume PROXY header
+		// 220 arrives alone (PROXY rejected in a separate segment, arrives as response to EHLO)
+		writeLine(conn, "220 stalwart.example.com ESMTP ready")
+		readLine(conn) // consume EHLO
+		// PROXY rejection arrives as "response" to EHLO (separate TCP segment)
+		writeLine(conn, "500 5.5.1 Invalid command.")
+		// Now HELO fallback is triggered. Client sends HELO.
+		readLine(conn) // consume HELO
+		// Send EHLO response (11 lines) and HELO response (1 line) in SEPARATE
+		// writes to simulate separate TCP segments — this is the timing race.
+		io.WriteString(conn, "250-stalwart.example.com you had me at EHLO\r\n250-STARTTLS\r\n250-SMTPUTF8\r\n250-SIZE 104857600\r\n250-REQUIRETLS\r\n250-PIPELINING\r\n250-NO-SOLICITING\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250-BINARYMIME\r\n250 8BITMIME\r\n") //nolint:errcheck
+		// Small delay to ensure the 11-line write is flushed before the 12th line,
+		// guaranteeing a buffer-empty moment between the two writes.
+		time.Sleep(5 * time.Millisecond)
+		writeLine(conn, "250 stalwart.example.com you had me at HELO")
+		readLine(conn) // MAIL FROM
+		writeLine(conn, "250 2.1.0 OK")
+		readLine(conn) // RCPT TO
+		writeLine(conn, "250 2.1.5 OK")
+		readLine(conn) // DATA
+		writeLine(conn, "354 Go ahead")
+		buf := make([]byte, 4096)
+		for {
+			n, _ := conn.Read(buf)
+			if strings.Contains(string(buf[:n]), "\r\n.\r\n") {
+				break
+			}
+		}
+		writeLine(conn, "250 2.0.0 OK")
+		readLine(conn) // QUIT
+		writeLine(conn, "221 Bye")
+	})
+
+	sess, err := newSMTPSession(addr, "tunnelmail.local", "2a01:111:f403:c40d::2", true, 5*time.Second)
+	if err != nil {
+		t.Fatalf("newSMTPSession: %v", err)
+	}
+	defer sess.Close()
+
+	if err := sess.Mail("sender@westpac.com.au"); err != nil {
+		t.Fatalf("Mail: %v — 12th HELO response line was not drained, 1-line offset", err)
+	}
+	if err := sess.Rcpt("ariel@moisis.net"); err != nil {
+		t.Fatalf("Rcpt: %v", err)
+	}
+	wc, err := sess.Data()
+	if err != nil {
+		t.Fatalf("Data: expected 354, got error: %v", err)
+	}
+	io.WriteString(wc, "Subject: test\r\n\r\nHello\r\n")
+	wc.Close()
+	code, msg, err := sess.readFinalDataResponse()
+	if err != nil {
+		t.Fatalf("readFinalDataResponse: %v", err)
+	}
+	if code != 250 {
+		t.Errorf("expected 250, got %d %s", code, msg)
+	}
+}
