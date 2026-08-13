@@ -14,6 +14,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/smtp"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -319,13 +320,11 @@ type smtpResult struct {
 	Message string `json:"smtp_message"`
 }
 
-// smtpSession is a minimal SMTP client that gives us full control over the
-// command/response stream, including the ability to capture the queue ID
-// returned after the DATA terminator.
+// smtpSession wraps net/smtp.Client to provide reliable EHLO/MAIL/RCPT
+// handling while also capturing the final DATA acceptance response (queue ID)
+// that the stdlib WriteCloser.Close() discards.
 type smtpSession struct {
-	conn    net.Conn
-	text    *textproto.Conn
-	timeout time.Duration
+	client *smtp.Client
 }
 
 func describeSMTPHandshakeError(host string, useProxyProtocol bool, err error) error {
@@ -360,103 +359,92 @@ func newSMTPSession(host, localName, clientIP string, useProxyProtocol bool, tim
 		}
 	}
 
-	s := &smtpSession{
-		conn:    conn,
-		text:    textproto.NewConn(conn),
-		timeout: timeout,
-	}
-
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		s.Close()
+		conn.Close()
 		return nil, err
 	}
 
-	// Read the server banner.
-	if _, _, err := s.text.ReadResponse(220); err != nil {
-		s.Close()
+	// Use net/smtp.NewClient which correctly handles multi-line EHLO responses,
+	// reads the server greeting, and sends EHLO/HELO with proper fallback.
+	c, err := smtp.NewClient(conn, host)
+	if err != nil {
+		conn.Close()
 		return nil, describeSMTPHandshakeError(host, useProxyProtocol, err)
 	}
 
-	// Send EHLO/HELO.
-	if err := s.hello(localName); err != nil {
-		s.Close()
-		return nil, err
-	}
-
-	return s, nil
-}
-
-func (s *smtpSession) hello(localName string) error {
 	log.Printf("SMTP -> EHLO %s", localName)
-	if err := s.text.PrintfLine("EHLO %s", localName); err != nil {
-		return err
+	if helloErr := c.Hello(localName); helloErr != nil {
+		c.Close()
+		return nil, helloErr
 	}
-	code, msg, err := s.text.ReadResponse(250)
-	log.Printf("SMTP <- %d %s", code, msg)
-	if err != nil {
-		// Fall back to HELO if EHLO is not supported.
-		log.Printf("SMTP -> HELO %s", localName)
-		if err := s.text.PrintfLine("HELO %s", localName); err != nil {
-			return err
+	// Log the advertised SMTP extensions after a successful EHLO.
+	for _, ext := range []string{
+		"STARTTLS", "SMTPUTF8", "SIZE", "REQUIRETLS", "PIPELINING",
+		"NO-SOLICITING", "ENHANCEDSTATUSCODES", "CHUNKING", "BINARYMIME", "8BITMIME",
+	} {
+		if ok, param := c.Extension(ext); ok {
+			if param != "" {
+				log.Printf("SMTP cap: %s %s", ext, param)
+			} else {
+				log.Printf("SMTP cap: %s", ext)
+			}
 		}
-		code, msg, err = s.text.ReadResponse(250)
-		log.Printf("SMTP <- %d %s", code, msg)
-		return err
 	}
-	return nil
+
+	return &smtpSession{client: c}, nil
 }
 
 func (s *smtpSession) Mail(from string) error {
 	log.Printf("SMTP -> MAIL FROM:<%s>", from)
-	if err := s.text.PrintfLine("MAIL FROM:<%s>", from); err != nil {
-		return err
+	err := s.client.Mail(from)
+	if err != nil {
+		log.Printf("SMTP MAIL error: %v", err)
+	} else {
+		log.Printf("SMTP MAIL FROM accepted")
 	}
-	code, msg, err := s.text.ReadResponse(250)
-	log.Printf("SMTP <- %d %s", code, msg)
 	return err
 }
 
 func (s *smtpSession) Rcpt(to string) error {
 	log.Printf("SMTP -> RCPT TO:<%s>", to)
-	if err := s.text.PrintfLine("RCPT TO:<%s>", to); err != nil {
-		return err
+	err := s.client.Rcpt(to)
+	if err != nil {
+		log.Printf("SMTP RCPT error: %v", err)
+	} else {
+		log.Printf("SMTP RCPT TO accepted")
 	}
-	code, msg, err := s.text.ReadResponse(25) // 250 or 251
-	log.Printf("SMTP <- %d %s", code, msg)
 	return err
 }
 
+// Data sends the DATA command, writes the message body via the returned
+// WriteCloser, closes it (sending the dot terminator), then reads and returns
+// the server's final acceptance response including the queue ID.
 func (s *smtpSession) Data() (io.WriteCloser, error) {
 	log.Printf("SMTP -> DATA")
-	if err := s.text.PrintfLine("DATA"); err != nil {
+	// Use the underlying textproto connection so we can capture the final 250.
+	if err := s.client.Text.PrintfLine("DATA"); err != nil {
 		return nil, err
 	}
-	code, msg, err := s.text.ReadResponse(354)
+	code, msg, err := s.client.Text.ReadResponse(354)
 	log.Printf("SMTP <- %d %s", code, msg)
 	if err != nil {
 		return nil, err
 	}
-	return s.text.DotWriter(), nil
+	return s.client.Text.DotWriter(), nil
 }
 
 func (s *smtpSession) readFinalDataResponse() (int, string, error) {
-	code, msg, err := s.text.ReadResponse(250)
+	code, msg, err := s.client.Text.ReadResponse(250)
 	log.Printf("SMTP <- %d %s", code, msg)
 	return code, msg, err
 }
 
 func (s *smtpSession) Quit() error {
-	log.Printf("SMTP -> QUIT")
-	if err := s.text.PrintfLine("QUIT"); err != nil {
-		return err
-	}
-	code, msg, err := s.text.ReadResponse(221)
-	log.Printf("SMTP <- %d %s", code, msg)
-	return err
+	return s.client.Quit()
 }
 
 func (s *smtpSession) Close() error {
-	return s.text.Close()
+	return s.client.Close()
 }
 
 // Task 6: SSRF Prevention - Block private IPs
